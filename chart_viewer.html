@@ -495,16 +495,21 @@ function _renderModal(){
     var ac  = s.ai.action||'WATCH';
     var aCol= {BUY:'var(--green)',WATCH:'var(--amber)',AVOID:'var(--red)'}[ac]||'var(--muted2)';
     var aCls= 'ai-'+ac;
+    var aiSrc = (s.ai.vision?'👁 Visual':'📊 Text') + (s.ai.rag?' + 📚 Book RAG':'');
     metaHtml += '<div class="meta-ai-section">'
+      +'<div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:.04em">MINERVINI AI · '+aiSrc+'</div>'
       +'<div class="ai-banner '+aCls+'" style="background:'+aCol+'15;border:1px solid '+aCol+'44">'
         +'<span class="ai-pat">'+(s.ai.pattern||'')+'</span>'
         +(s.ai.conf?'<span style="font-size:11px;opacity:.7">&nbsp;'+s.ai.conf+'%</span>':'')
         +'<span style="margin-left:auto;font-weight:800;color:'+aCol+'">'+ac+'</span>'
-        +(s.ai.note?'<span class="ai-note">·&nbsp;'+s.ai.note+'</span>':'')
       +'</div>'
+      +(s.ai.entry_rule?'<div style="margin-top:6px;padding:6px 8px;background:var(--bg2);border-left:2px solid var(--blue);border-radius:3px;font-size:10px;color:var(--text)"><span style="color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.06em">Entry Rule · </span>'+s.ai.entry_rule+'</div>':'')
+      +(s.ai.note?'<div style="margin-top:5px;font-size:10px;color:var(--muted2)">'+s.ai.note+'</div>':'')
+      +'<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">'
       +(s.ai.support?'<div class="meta-cell"><div class="meta-lbl">AI Support</div><div class="meta-val" style="color:var(--green)">'+cur+fmt(s.ai.support,0)+'</div></div>':'')
       +(s.ai.resistance?'<div class="meta-cell"><div class="meta-lbl">AI Resist.</div><div class="meta-val" style="color:var(--red)">'+cur+fmt(s.ai.resistance,0)+'</div></div>':'')
       +(s.ai.date?'<div class="meta-cell"><div class="meta-lbl">AI Date</div><div class="meta-val" style="color:var(--muted2)">'+s.ai.date+'</div></div>':'')
+      +'</div>'
       +'</div>';
   }
 

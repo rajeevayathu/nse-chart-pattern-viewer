@@ -402,6 +402,14 @@ def identify_chart_pattern(close, high, low, volume, ma20_arr, ma50_arr):
 import urllib.request as _urllib_req
 import base64 as _b64
 
+# Minervini RAG — loaded lazily; works without the index (graceful degradation)
+try:
+    import minervini_rag as _mrag
+    _RAG_AVAILABLE = os.path.exists(_mrag.INDEX_PATH)
+except ImportError:
+    _mrag = None
+    _RAG_AVAILABLE = False
+
 _AI_ENABLED     = False
 _OLLAMA_URL     = 'http://localhost:11434'
 _OLLAMA_MODEL   = 'llava:7b'
@@ -497,58 +505,90 @@ def _call_ollama(prompt, img_path=None, num_predict=220):
     return _json.loads(resp.read()).get('response', '').strip()
 
 
-def claude_analyze(ticker, ohlcv_summary, timeframe='daily', img_path=None):
+def claude_analyze(ticker, ohlcv_summary, timeframe='daily', img_path=None, entry=None):
     """
-    Visual AI analysis: sends chart PNG to Ollama vision model.
-    Falls back to text-only OHLCV analysis if no vision model available.
+    Visual AI analysis grounded in Minervini's book via RAG.
+    Sends chart PNG to Ollama vision model; falls back to text-only if needed.
     Returns dict: {pattern, conf, support, resistance, note, action} or None.
     """
     if not _AI_ENABLED:
         return None
     import json as _json
 
-    tf = 'weekly' if timeframe == 'weekly' else 'daily'
+    tf  = 'weekly' if timeframe == 'weekly' else 'daily'
+    ent = entry or {}
+
+    # ── RAG: retrieve relevant Minervini principles ───────────────────────────
+    rag_ctx = ''
+    if _RAG_AVAILABLE and _mrag is not None:
+        try:
+            rag_ctx = _mrag.get_minervini_context(
+                pattern   = str(ent.get('ai', {}).get('pattern', '')),
+                stage     = 2 if ent.get('passed', 0) >= 6 else None,
+                pivot_pct = float(ent.get('pct_from_pivot') or ent.get('pct_from_pivot_w') or 99),
+                rs        = int(ent.get('rs_rank') or 0),
+            )
+        except Exception:
+            rag_ctx = ''
+
+    rag_block = f"\n{rag_ctx}\n" if rag_ctx else ''
+
+    # ── BUILD PROMPT ──────────────────────────────────────────────────────────
+    persona = (
+        "You are Mark Minervini, champion stock trader and author of "
+        "'Trade Like a Stock Market Wizard'. "
+        "You apply your SEPA (Specific Entry Point Analysis) methodology strictly.\n"
+        "Your rules: Stage 2 uptrend required, VCP base preferred, volume must dry up "
+        "in the base and surge on breakout, always cut losses at 7-10%, "
+        "only buy within 5% of a proper pivot point.\n"
+    )
+
+    json_schema = (
+        'Reply with ONLY valid JSON on one line, no markdown, no explanation:\n'
+        '{"pattern":"<VCP|CUP & HANDLE|BREAKOUT|BULL FLAG|DOUBLE BOTTOM|'
+        'ASCENDING TRIANGLE|TIGHT BASE|FLAT BASE|STAGE 2|STAGE 4|CHOPPY>",'
+        '"conf":<0-100>,"support":<price>,"resistance":<price>,'
+        '"entry_rule":"<max 60 chars: exact Minervini entry condition>","note":"<max 60 chars: what you see>",'
+        '"action":"<BUY|WATCH|AVOID>"}'
+    )
 
     if _VISION_CAPABLE and img_path and os.path.exists(img_path):
-        # ── VISUAL MODE: model looks at the actual chart image ────────────────
+        # ── VISUAL MODE ───────────────────────────────────────────────────────
         prompt = (
-            f"You are a professional stock trader using Mark Minervini's SEPA method.\n"
-            f"Look at this {tf} candlestick chart for {ticker}.\n\n"
-            f"Additional context:\n{ohlcv_summary}\n\n"
-            f"Visually identify the chart pattern by examining:\n"
-            f"- Candlestick shape and trend (are prices making higher highs/lows?)\n"
-            f"- Moving average alignment (MA20 above MA50 above MA200?)\n"
-            f"- Volume pattern (rising on up days, falling on down days?)\n"
-            f"- Any classic pattern: Cup & Handle, VCP, Bull Flag, Double Bottom, "
-            f"Ascending Triangle, Tight Base, or Breakout\n"
-            f"- Support and resistance levels visible on the chart\n\n"
-            f"Reply with ONLY valid JSON on one line, no markdown, no explanation:\n"
-            f'{{"pattern":"<CUP & HANDLE|VCP|BREAKOUT|BULL FLAG|DOUBLE BOTTOM|'
-            f'ASCENDING TRIANGLE|TIGHT BASE|STAGE 2|STAGE 4|WATCH>",'
-            f'"conf":<0-100>,"support":<price>,"resistance":<price>,'
-            f'"note":"<max 55 chars: what you visually see>","action":"<BUY|WATCH|AVOID>"}}'
+            f"{persona}"
+            f"{rag_block}"
+            f"Now look at this {tf} candlestick chart for {ticker}.\n\n"
+            f"Numerical context:\n{ohlcv_summary}\n\n"
+            f"Apply your SEPA checklist visually:\n"
+            f"1. Stage: Is price above MA50, MA50 above MA150, MA150 above MA200? (Stage 2)\n"
+            f"2. VCP: Do you see tightening price contractions with declining volume in the base?\n"
+            f"3. Pivot: Is there a clear buy point (handle high, base high, tight area high)?\n"
+            f"4. Volume: Volume drying up in base, then a surge on the breakout bar?\n"
+            f"5. Moving averages: Price stacked above MA20 > MA50 > MA200?\n"
+            f"6. RS: Is this stock trending up relative to the market?\n\n"
+            f"{json_schema}"
         )
     else:
-        # ── TEXT-ONLY FALLBACK: model reads OHLCV numbers ─────────────────────
+        # ── TEXT-ONLY FALLBACK ────────────────────────────────────────────────
         prompt = (
-            f"You are a technical analyst using Mark Minervini's SEPA method.\n"
-            f"Analyze {ticker} on a {tf} chart from this data:\n\n{ohlcv_summary}\n\n"
-            f"Reply with ONLY valid JSON on one line:\n"
-            f'{{"pattern":"<CUP & HANDLE|VCP|BREAKOUT|BULL FLAG|DOUBLE BOTTOM|'
-            f'ASCENDING TRIANGLE|TIGHT BASE|STAGE 2|WATCH>",'
-            f'"conf":<0-100>,"support":<price>,"resistance":<price>,'
-            f'"note":"<max 55 chars>","action":"<BUY|WATCH|AVOID>"}}'
+            f"{persona}"
+            f"{rag_block}"
+            f"Analyze {ticker} ({tf}) from this data:\n\n{ohlcv_summary}\n\n"
+            f"Apply SEPA: check stage, base quality, volume pattern, pivot proximity.\n\n"
+            f"{json_schema}"
         )
 
     try:
-        text = _call_ollama(prompt, img_path=img_path if _VISION_CAPABLE else None)
+        text = _call_ollama(prompt, img_path=img_path if _VISION_CAPABLE else None,
+                            num_predict=280)
         s, e = text.find('{'), text.rfind('}') + 1
         if s >= 0 and e > s:
             result = _json.loads(text[s:e])
             if 'confidence' in result and 'conf' not in result:
                 v = result.pop('confidence')
                 result['conf'] = int(float(v) * 100 if float(v) <= 1.0 else float(v))
-            result['vision'] = _VISION_CAPABLE   # flag so viewer can show "Visual AI"
+            result['vision'] = _VISION_CAPABLE
+            result['rag']    = bool(rag_ctx)
             if 'pattern' in result and 'action' in result:
                 return result
     except Exception:
@@ -1568,13 +1608,15 @@ def run_ai_on_screen(screen_data, cache_dir, out_dir, is_us, bars, ai_top, weekl
             result = claude_analyze(
                 ticker, ohlcv_sum,
                 timeframe='weekly' if weekly else 'daily',
-                img_path=img_path          # ← vision model reads the actual chart PNG
+                img_path=img_path,
+                entry=s,               # ← stock entry for RAG context
             )
             if result:
                 result['date'] = today
                 s['ai'] = result
                 vis_tag = '👁' if result.get('vision') else '📊'
-                print(f"    {vis_tag} {ticker}: {result.get('pattern')} "
+                rag_tag = '📚' if result.get('rag') else ''
+                print(f"    {vis_tag}{rag_tag} {ticker}: {result.get('pattern')} "
                       f"{result.get('conf')}% → {result.get('action')}", flush=True)
         except Exception:
             pass
@@ -1776,12 +1818,27 @@ Daily workflow (run every morning after scanner):
                         help='Run Ollama AI analysis (llama3.2, free, offline)')
     parser.add_argument('--ai-top',      type=int, default=25,
                         help='AI analysis: top N stocks per priority screen (default 25)')
+    parser.add_argument('--build-rag',   metavar='PDF',
+                        help='Build Minervini RAG index from PDF (one-time setup)')
     args = parser.parse_args()
+
+    # ── RAG index build (one-time) ────────────────────────────────────────────
+    if args.build_rag:
+        if _mrag is None:
+            print("ERROR: minervini_rag.py not found next to this script.")
+            sys.exit(1)
+        _mrag.build_index(args.build_rag)
+        global _RAG_AVAILABLE
+        _RAG_AVAILABLE = True
+        print("\n✓ RAG index built. AI analysis will now use Minervini book context.")
+        if not args.ai_analysis:
+            sys.exit(0)
 
     # ── AI setup ─────────────────────────────────────────────────────────────
     if args.ai_analysis:
         if init_ai_client():
-            print(f"✓ Ollama AI ready ({_OLLAMA_MODEL}) — top {args.ai_top} per priority screen")
+            rag_status = '+ 📚 Minervini RAG' if _RAG_AVAILABLE else '(RAG index not built — run --build-rag)'
+            print(f"✓ Ollama AI ready ({_OLLAMA_MODEL}) — top {args.ai_top} per priority screen  {rag_status}")
         else:
             print("⚠  Ollama not reachable. Start with: ollama serve")
 
