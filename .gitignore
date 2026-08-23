@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+charts_india/
+charts_us/
+chart_manifest.json
+india_data.json
+us_data.json
+india_screens.xlsx
+us_screens.xlsx
+*.xlsx
+.DS_Store
