@@ -33,51 +33,61 @@ OUT_INDIA    = os.path.join(SCRIPT_DIR, 'charts_india')
 OUT_US       = os.path.join(SCRIPT_DIR, 'charts_us')
 HTML_OUT     = os.path.join(SCRIPT_DIR, 'chart_viewer.html')
 
-CHART_W, CHART_H = 8, 4.5   # inches per chart
-DPI = 100                    # lower = faster, higher = sharper
+CHART_W, CHART_H = 14, 7.875  # inches  (16:9, bigger canvas for sharpness)
+DPI = 120                       # sharper output
 
-# ── COLOUR PALETTE ────────────────────────────────────────────────────────────
-BG       = '#0d1117'
-GRID_C   = '#1c2333'
-UP_C     = '#3fb950'
-DN_C     = '#f85149'
-VOL_UP   = '#1e4620'
-VOL_DN   = '#4a1010'
-MA20_C   = '#fbbf24'    # amber
-MA50_C   = '#60a5fa'    # blue
-MA200_C  = '#a78bfa'    # violet
-TLINE_C  = '#94a3b8'    # slate (support/resistance lines)
-PIVOT_C  = '#fb923c'    # orange (breakout pivot)
-TEXT_C   = '#e6edf3'
+# ── COLOUR PALETTE  (TradingView light theme) ────────────────────────────────
+BG       = '#FFFFFF'   # figure background
+PANEL    = '#FAFAFA'   # chart panel
+GRID_C   = '#E0E3EB'   # subtle grid lines
+UP_C     = '#26A69A'   # classic TV teal/green
+DN_C     = '#EF5350'   # classic TV coral/red
+VOL_UP   = '#26A69A'
+VOL_DN   = '#EF5350'
+VOL_C    = '#F7A9A8'   # uniform pinkish volume bar (matches screenshot)
+VOL_MA_C = '#4CAF50'   # green volume MA line
+MA20_C   = '#F57F17'   # dark amber
+MA50_C   = '#1565C0'   # deep blue
+MA200_C  = '#7B1FA2'   # purple
+SR_RES_C = '#EF5350'   # resistance red
+SR_SUP_C = '#26A69A'   # support teal
+PIVOT_C  = '#FB8C00'   # orange pivot
+TEXT_C   = '#131722'   # primary text (dark)
+MUTED_C  = '#787B86'   # secondary text (gray)
+LABEL_BG = '#FFFFFF'   # label background
 
 # ── PATTERN DETECTION ─────────────────────────────────────────────────────────
 
 def find_pivot_highs(high, left=10, right=10, lookback=150):
     """
-    Pivot high: bar must be the highest in [left] bars before AND [right] bars after.
-    Minervini/TradingView standard: left=10, right=10.
+    Pine Script ta.pivothigh(left, right): bar i is a pivot high iff high[i] is the
+    UNIQUE maximum of the window [i-left .. i+right] — strictly greater than all
+    surrounding bars with no ties allowed.
     """
     h = np.array(high[-lookback:] if len(high) > lookback else high, dtype=float)
     offset = max(0, len(high) - lookback)
     pivots = []
     for i in range(left, len(h) - right):
         window = h[i - left: i + right + 1]
-        if float(h[i]) >= float(np.max(window)):
+        wmax = float(np.max(window))
+        if float(h[i]) == wmax and np.sum(window == wmax) == 1:
             pivots.append((offset + i, float(h[i])))
     return pivots
 
 
 def find_pivot_lows(low, left=10, right=10, lookback=150):
     """
-    Pivot low: bar must be the lowest in [left] bars before AND [right] bars after.
-    Minervini/TradingView standard: left=10, right=10.
+    Pine Script ta.pivotlow(left, right): bar i is a pivot low iff low[i] is the
+    UNIQUE minimum of the window [i-left .. i+right] — strictly lower than all
+    surrounding bars with no ties allowed.
     """
     l = np.array(low[-lookback:] if len(low) > lookback else low, dtype=float)
     offset = max(0, len(low) - lookback)
     pivots = []
     for i in range(left, len(l) - right):
         window = l[i - left: i + right + 1]
-        if float(l[i]) <= float(np.min(window)):
+        wmin = float(np.min(window))
+        if float(l[i]) == wmin and np.sum(window == wmin) == 1:
             pivots.append((offset + i, float(l[i])))
     return pivots
 
@@ -496,12 +506,21 @@ def _call_ollama(prompt, img_path=None, num_predict=220):
         'options': {'temperature': 0.1, 'num_predict': num_predict},
     }
     if img_path and _VISION_CAPABLE and os.path.exists(img_path):
-        with open(img_path, 'rb') as f:
-            payload['images'] = [_b64.b64encode(f.read()).decode()]
+        try:
+            from PIL import Image as _PILImage
+            import io as _io
+            with _PILImage.open(img_path) as _im:
+                _im.thumbnail((900, 506), _PILImage.LANCZOS)  # ~half-res for fast inference
+                _buf = _io.BytesIO()
+                _im.save(_buf, format='PNG', optimize=True)
+                payload['images'] = [_b64.b64encode(_buf.getvalue()).decode()]
+        except Exception:
+            with open(img_path, 'rb') as f:
+                payload['images'] = [_b64.b64encode(f.read()).decode()]
     body = _json.dumps(payload).encode()
     req  = _urllib_req.Request(f'{_OLLAMA_URL}/api/generate', data=body,
                                headers={'Content-Type': 'application/json'})
-    resp = _urllib_req.urlopen(req, timeout=90)
+    resp = _urllib_req.urlopen(req, timeout=600)  # 10 min — vision inference can be slow
     return _json.loads(resp.read()).get('response', '').strip()
 
 
@@ -543,12 +562,18 @@ def claude_analyze(ticker, ohlcv_summary, timeframe='daily', img_path=None, entr
         "only buy within 5% of a proper pivot point.\n"
     )
 
+    price_now = float(ent.get('price') or 0)
     json_schema = (
         'Reply with ONLY valid JSON on one line, no markdown, no explanation:\n'
         '{"pattern":"<VCP|CUP & HANDLE|BREAKOUT|BULL FLAG|DOUBLE BOTTOM|'
         'ASCENDING TRIANGLE|TIGHT BASE|FLAT BASE|STAGE 2|STAGE 4|CHOPPY>",'
-        '"conf":<0-100>,"support":<price>,"resistance":<price>,'
-        '"entry_rule":"<max 60 chars: exact Minervini entry condition>","note":"<max 60 chars: what you see>",'
+        '"conf":<0-100>,'
+        '"support":<nearest support price>,'
+        '"resistance":<nearest resistance price>,'
+        f'"entry":<exact pivot/buy-point price — current price is {price_now:.2f}>,'
+        '"stop":<stop loss price — just below support or recent pivot low>,'
+        '"target":<price target — minimum 2:1 risk-reward from entry>,'
+        '"entry_rule":"<max 60 chars: exact Minervini entry trigger>","note":"<max 60 chars: key observation>",'
         '"action":"<BUY|WATCH|AVOID>"}'
     )
 
@@ -871,21 +896,103 @@ def build_extra_screens(results_json, cache_dir, out_dir, bars, is_us,
                 else:
                     generated.append(entry)
             else:
-                # Full mode: regenerate if PNG missing
-                png = os.path.join(out_dir, t + suffix + '.png')
-                if os.path.exists(png):
+                # Full mode: always regenerate
+                out_path = generate_chart(t, s, cache_dir, out_dir,
+                                          is_us=is_us, bars=bars, weekly=use_weekly)
+                if out_path:
                     generated.append(entry)
                 else:
-                    out_path = generate_chart(t, s, cache_dir, out_dir,
-                                              is_us=is_us, bars=bars, weekly=use_weekly)
-                    if out_path:
+                    # no cached data — keep entry so it still appears in the screen
+                    png = os.path.join(out_dir, t + suffix + '.png')
+                    if os.path.exists(png):
                         generated.append(entry)
-                        print(f"    ✓ {t}{suffix} (new)", flush=True)
 
         if new_count:
             print(f"    {new_count} charts regenerated", flush=True)
         result[key] = {'label': defn['label'], 'stocks': generated}
     return result
+
+
+def build_near_weekly_pivot(results_json, cache_dir, out_dir, bars,
+                             is_us=False, manifest=None, existing_data=None,
+                             pct_lo=-8.0, pct_hi=5.0):
+    """
+    Build the Near Weekly Pivot screen from ALL stocks in results.json
+    where pct_from_pivot_w is within [pct_lo, pct_hi].
+    Generates (or reuses) _W.png for each qualifying stock.
+    Returns {'label':..., 'stocks':[...]} ready for india_data / us_data.
+    """
+    try:
+        with open(results_json) as f:
+            raw = json.load(f)
+    except Exception as e:
+        print(f"  ERROR loading {results_json}: {e}")
+        return {'label': 'Near Weekly Pivot', 'stocks': []}
+
+    # Deduplicate: one entry per ticker (keep first occurrence)
+    seen = {}
+    for scr in raw.get('screens', {}).values():
+        for s in scr.get('stocks', []):
+            t = s.get('ticker', '')
+            if t and t not in seen:
+                seen[t] = s
+
+    # Filter by pct_from_pivot_w
+    qualifying = []
+    for t, s in seen.items():
+        pct = s.get('pct_from_pivot_w')
+        if pct is not None and pct_lo <= pct <= pct_hi:
+            qualifying.append(s)
+
+    # Sort by distance from pivot (closest first)
+    qualifying.sort(key=lambda s: abs(s.get('pct_from_pivot_w') or 99))
+    print(f"  Near Weekly Pivot: {len(qualifying)} stocks within {pct_lo}% to +{pct_hi}% of weekly pivot")
+
+    # Restore previous AI results
+    old_ai = {}
+    if existing_data and 'near_weekly_pivot' in existing_data:
+        old_ai = {e['ticker']: e.get('ai')
+                  for e in existing_data['near_weekly_pivot'].get('stocks', []) if e.get('ai')}
+
+    os.makedirs(out_dir, exist_ok=True)
+    generated = []
+    new_count  = 0
+
+    for s in qualifying:
+        t     = s.get('ticker', '')
+        entry = dict(s)
+        entry['img'] = t + '_W.png'
+        if t in old_ai:
+            entry['ai'] = old_ai[t]
+
+        png = os.path.join(out_dir, t + '_W.png')
+
+        if manifest is not None:
+            # Daily mode
+            if is_stale(t, s, manifest, out_dir, '_W'):
+                out_path = generate_chart(t, s, cache_dir, out_dir,
+                                          is_us=is_us, bars=bars, weekly=True)
+                if out_path:
+                    update_manifest(manifest, t, s, '_W')
+                    generated.append(entry)
+                    new_count += 1
+                elif os.path.exists(png):
+                    generated.append(entry)
+            else:
+                generated.append(entry)
+        else:
+            # Full mode: always regenerate
+            out_path = generate_chart(t, s, cache_dir, out_dir,
+                                      is_us=is_us, bars=bars, weekly=True)
+            if out_path:
+                generated.append(entry)
+                new_count += 1
+            elif os.path.exists(png):
+                generated.append(entry)
+
+    if new_count:
+        print(f"    {new_count} weekly charts generated", flush=True)
+    return {'label': 'Near Weekly Pivot', 'stocks': generated}
 
 
 # ── CHART GENERATOR ───────────────────────────────────────────────────────────
@@ -954,14 +1061,19 @@ def generate_chart(ticker, entry, cache_dir, out_dir, is_us=False, bars=90, week
     cl  = df['Close'].values.astype(float)
     vol = df['Volume'].values.astype(float)
 
-    # MAs — computed on the same timeframe (weekly if weekly mode)
+    # MAs — computed on full history first, then slice to display window
+    # Daily:  EMA21 (short), SMA50 (medium), SMA200 (long)  — Minervini daily methodology
+    # Weekly: EMA5 (short), SMA10 (10-week ≈ SMA50 daily), SMA40 (40-week ≈ SMA200 daily) — Minervini weekly methodology
     full_src = resample_weekly(df_daily) if weekly else df_daily
-    full_c = full_src['Close'].values.astype(float)
-    # For weekly: MA10/26/52 (≈ MA20/50/200 on weekly); daily: MA20/50/200
-    ma_p1, ma_p2, ma_p3 = (10, 26, 52) if weekly else (20, 50, 200)
-    ma20_full  = pd.Series(full_c).rolling(ma_p1).mean().values
-    ma50_full  = pd.Series(full_c).rolling(ma_p2).mean().values
-    ma200_full = pd.Series(full_c).rolling(ma_p3).mean().values
+    full_c = pd.Series(full_src['Close'].values.astype(float))
+    if weekly:
+        ma20_full  = full_c.ewm(span=5, adjust=False).mean().values   # EMA5 weekly short-term
+        ma50_full  = full_c.rolling(10).mean().values                  # 10-week SMA (Minervini key level)
+        ma200_full = full_c.rolling(40).mean().values                  # 40-week SMA (Minervini key level)
+    else:
+        ma20_full  = full_c.ewm(span=21, adjust=False).mean().values   # EMA21 daily
+        ma50_full  = full_c.rolling(50).mean().values                  # SMA50
+        ma200_full = full_c.rolling(200).mean().values                 # SMA200
     ma20  = ma20_full[-n:]
     ma50  = ma50_full[-n:]
     ma200 = ma200_full[-n:]
@@ -992,9 +1104,15 @@ def generate_chart(ticker, entry, cache_dir, out_dir, is_us=False, bars=90, week
     # Base / consolidation box
     base_box = detect_base_box(cl, hi, lo, lookback=min(n, 50))
 
-    # Breakout level
-    pivot_high = entry.get('pivot_high')
-    pivot_crossed = entry.get('pivot_crossed', False)
+    # Breakout level — use weekly pivot when in weekly mode
+    if weekly:
+        pivot_high    = entry.get('pivot_high_w')
+        pivot_crossed = entry.get('pivot_crossed_w', False)
+        pivot_bars_ago_key = 'pivot_bars_ago_w'
+    else:
+        pivot_high    = entry.get('pivot_high')
+        pivot_crossed = entry.get('pivot_crossed', False)
+        pivot_bars_ago_key = 'pivot_bars_ago'
 
     # Pattern identification
     pct_hi   = entry.get('pct_from_high', -99)
@@ -1003,47 +1121,107 @@ def generate_chart(ticker, entry, cache_dir, out_dir, is_us=False, bars=90, week
     pat_name, pat_conf, pat_note = identify_chart_pattern(cl, hi, lo, vol, ma20, ma50)
     pattern_label = pat_name
 
+    # ── META STRINGS (computed before figure) ────────────────────────────────
+    price_str  = f"{'$' if is_us else '₹'}{cl[-1]:,.2f}"
+    pct_h_str  = f"{pct_hi:+.1f}%" if pct_hi is not None else ''
+    rs_str     = f"RS {entry.get('rs_rank', '?')}"
+    passed_str = f"{passed}/8"
+    tf_str     = 'W' if weekly else 'D'
+    ma_label1  = 'EMA5'  if weekly else 'EMA21'
+    ma_label2  = '10W'   if weekly else 'MA50'
+    ma_label3  = '40W'   if weekly else 'MA200'
+
+    _PAT_COLORS = {
+        'BREAKOUT':           '#26d47a',
+        'NEAR BREAKOUT':      '#26d47a',
+        'CUP & HANDLE':       '#f6a821',
+        'DOUBLE BOTTOM':      '#4da8ff',
+        'ASCENDING TRIANGLE': '#b588f9',
+        'BULL FLAG':          '#ff9d3a',
+        'TIGHT BASE':         '#f6a821',
+        'STAGE 2':            '#b588f9',
+        'VCP':                '#f6a821',
+        'WATCH':              '#5a7a90',
+    }
+    label_color = _PAT_COLORS.get(pat_name, '#5a7a90')
+
     # ── FIGURE SETUP ──────────────────────────────────────────────────────────
+    # layout: compact 12% header band + 88% chart area, right margin for Y labels
     fig = plt.figure(figsize=(CHART_W, CHART_H), facecolor=BG)
-    ax_price = fig.add_axes([0.0, 0.22, 1.0, 0.78], facecolor=BG)
-    ax_vol   = fig.add_axes([0.0, 0.00, 1.0, 0.20], facecolor=BG, sharex=ax_price)
+    gs  = fig.add_gridspec(
+        2, 1, height_ratios=[4, 1],
+        left=0.01, right=0.88, top=0.88, bottom=0.075, hspace=0.04
+    )
+    ax_price = fig.add_subplot(gs[0])
+    ax_vol   = fig.add_subplot(gs[1], sharex=ax_price)
+    ax_price.set_facecolor(PANEL)
+    ax_vol.set_facecolor(PANEL)
 
     # ── CANDLESTICKS ──────────────────────────────────────────────────────────
-    W = 0.6
+    W = 0.65
     for i in range(n):
-        color = UP_C if cl[i] >= op[i] else DN_C
-        ax_price.plot([i, i], [lo[i], hi[i]], color=color, linewidth=0.6, zorder=2)
+        is_up  = cl[i] >= op[i]
+        color  = UP_C if is_up else DN_C
+        body_l = min(op[i], cl[i])
+        body_h = max(op[i], cl[i])
+        min_body = (hi[i] - lo[i]) * 0.003
+        if body_h - body_l < min_body:
+            body_h = body_l + min_body
+        # Wick — thin, same color as body
+        ax_price.plot([i, i], [lo[i], hi[i]], color=color, linewidth=0.7, zorder=2)
+        # Body — filled with slight border
         ax_price.add_patch(plt.Rectangle(
-            (i - W/2, min(op[i], cl[i])), W, abs(cl[i] - op[i]),
-            color=color, zorder=2
+            (i - W/2, body_l), W, body_h - body_l,
+            facecolor=color, edgecolor=color, linewidth=0.3, alpha=0.9, zorder=3
         ))
 
     # ── VOLUME ────────────────────────────────────────────────────────────────
     vol_ma = pd.Series(vol).rolling(20).mean().values
     for i in range(n):
-        vc = VOL_UP if cl[i] >= op[i] else VOL_DN
-        ax_vol.bar(i, vol[i], color=vc, width=W, zorder=2)
-    ax_vol.plot(xs, vol_ma, color='#64748b', linewidth=0.8, zorder=3)
+        ax_vol.add_patch(plt.Rectangle(
+            (i - W/2, 0), W, vol[i],
+            facecolor=VOL_C, edgecolor='none', alpha=0.75, zorder=2
+        ))
+    ax_vol.plot(xs, vol_ma, color=VOL_MA_C, linewidth=1.2, zorder=3)
+    ax_vol.set_ylim(0, float(np.nanmax(vol)) * 1.4)
 
     # ── MOVING AVERAGES ───────────────────────────────────────────────────────
     valid20  = ~np.isnan(ma20)
     valid50  = ~np.isnan(ma50)
     valid200 = ~np.isnan(ma200)
-    if valid20.any():  ax_price.plot(xs[valid20],  ma20[valid20],  color=MA20_C,  linewidth=1.0, zorder=3, label='MA20')
-    if valid50.any():  ax_price.plot(xs[valid50],  ma50[valid50],  color=MA50_C,  linewidth=1.0, zorder=3, label='MA50')
-    if valid200.any(): ax_price.plot(xs[valid200], ma200[valid200],color=MA200_C, linewidth=0.8, zorder=3, label='MA200', linestyle='--')
+    if valid20.any():
+        ax_price.plot(xs[valid20],  ma20[valid20],  color=MA20_C, linewidth=1.6, zorder=4, alpha=0.95)
+    if valid50.any():
+        ax_price.plot(xs[valid50],  ma50[valid50],  color=MA50_C, linewidth=1.6, zorder=4, alpha=0.95)
+    if valid200.any():
+        ax_price.plot(xs[valid200], ma200[valid200], color=MA200_C, linewidth=1.1, zorder=4,
+                      alpha=0.85, linestyle=(0, (5, 3)))
 
     # ── HORIZONTAL S/R LEVELS ────────────────────────────────────────────────
     price_now = float(cl[-1])
-    for lvl, touches in sr_levels:
+    price_range = float(np.max(hi)) - float(np.min(lo))
+    min_gap = price_range * 0.035
+    labeled_levels = []
+    for lvl, touches in sr_levels[:6]:
+        if any(abs(lvl - l) < min_gap for l in labeled_levels):
+            continue
+        if abs(lvl - price_now) < price_range * 0.025:
+            continue
+        labeled_levels.append(lvl)
         above = lvl > price_now
-        lc = '#f8514980' if above else '#3fb95080'   # red zone = resistance, green = support
-        lw = 0.5 + min(touches * 0.15, 0.6)
-        ax_price.axhline(lvl, color=lc, linewidth=lw, linestyle='--', alpha=0.85, zorder=4)
-        ax_price.text(n - 1, lvl,
-                      f"  {'R' if above else 'S'}{touches}× {lvl:,.0f}",
-                      color=lc, fontsize=5.5, va='center', ha='left', zorder=5,
-                      clip_on=False)
+        lc    = SR_RES_C if above else SR_SUP_C
+        lw    = 0.6 + min(touches * 0.10, 0.5)
+        ax_price.hlines(lvl, 0, n - 1, color=lc, linewidth=lw,
+                        linestyle=(0, (5, 5)), alpha=0.55, zorder=4)
+        # Inline floating label ON the chart (TradingView style)
+        label_x = max(2, n - int(n * 0.22))
+        fmt = f'{lvl:,.0f}' if lvl >= 100 else f'{lvl:.2f}'
+        ax_price.text(
+            label_x, lvl, fmt,
+            ha='left', va='center', fontsize=7.5, zorder=7,
+            color=lc, fontfamily='monospace',
+            bbox=dict(boxstyle='round,pad=0.18', fc=LABEL_BG, ec=lc, lw=0.6, alpha=0.88)
+        )
 
     # ── BASE / CONSOLIDATION BOX ─────────────────────────────────────────────
     if base_box is not None:
@@ -1052,133 +1230,192 @@ def generate_chart(ticker, entry, cache_dir, out_dir, is_us=False, bars=90, week
         brng = (bh - bl) / bl * 100 if bl > 0 else 0
         ax_price.add_patch(mpatches.FancyBboxPatch(
             (bx0, bl), bx1 - bx0, bh - bl,
-            boxstyle='square,pad=0', linewidth=0.7,
-            edgecolor='#60a5fa55', facecolor='#60a5fa08', zorder=3
+            boxstyle='square,pad=0', linewidth=1.0,
+            edgecolor=MA50_C + '88', facecolor=MA50_C + '12', zorder=3
         ))
-        ax_price.text(bx0 + 0.5, bh, f' Base {brng:.0f}%',
-                      color='#60a5fa', fontsize=5.5, va='bottom', ha='left', zorder=5)
+        ax_price.text(bx0 + 0.5, bh * 1.001, f' Base {brng:.0f}%',
+                      color=MA50_C, fontsize=7, va='bottom', ha='left', zorder=5)
 
-    # ── PIVOT DOTS ────────────────────────────────────────────────────────────
-    if ph_disp:
-        ax_price.scatter([p[0] for p in ph_disp], [p[1] for p in ph_disp],
-                         color=DN_C, s=18, zorder=5, marker='v')
-    if pl_disp:
-        ax_price.scatter([p[0] for p in pl_disp], [p[1] for p in pl_disp],
-                         color=UP_C, s=18, zorder=5, marker='^')
+    # ── PIVOT DOTS + INLINE PRICE LABELS (like screenshot) ───────────────────
+    ph_price_range = float(np.max(hi)) - float(np.min(lo))
+    ph_min_gap = ph_price_range * 0.04
+    ph_labeled = []
+    for px, pv in sorted(ph_disp, key=lambda x: -x[1])[:6]:
+        if any(abs(pv - v) < ph_min_gap for v in ph_labeled):
+            continue
+        ph_labeled.append(pv)
+        ax_price.scatter([px], [pv], color=DN_C, s=18, zorder=5, marker='v', linewidths=0)
+        fmt = f'{pv:,.2f}' if pv < 100 else f'{pv:,.2f}'
+        ax_price.text(px, pv * 1.013, fmt,
+                      ha='center', va='bottom', fontsize=7, color=MUTED_C,
+                      fontfamily='monospace', zorder=6)
+
+    pl_labeled = []
+    for px, pv in sorted(pl_disp, key=lambda x: x[1])[:6]:
+        if any(abs(pv - v) < ph_min_gap for v in pl_labeled):
+            continue
+        pl_labeled.append(pv)
+        ax_price.scatter([px], [pv], color=UP_C, s=18, zorder=5, marker='^', linewidths=0)
+        fmt = f'{pv:,.2f}' if pv < 100 else f'{pv:,.2f}'
+        ax_price.text(px, pv * 0.987, fmt,
+                      ha='center', va='top', fontsize=7, color=MUTED_C,
+                      fontfamily='monospace', zorder=6)
 
     # ── VCP CONTRACTION BRACKETS ──────────────────────────────────────────────
     for s_i, e_i, hv, lv, rng in vcps_disp[-3:]:
-        ax_price.annotate('', xy=(e_i, lv), xytext=(s_i, hv),
-                          arrowprops=dict(arrowstyle='<->', color='#fbbf24', lw=0.8))
         mid_x = (s_i + e_i) / 2
         mid_y = (hv + lv) / 2
-        ax_price.text(mid_x, mid_y, f'{rng:.0f}%', color='#fbbf24',
-                      fontsize=5.5, ha='center', va='center',
-                      bbox=dict(boxstyle='round,pad=0.15', fc='#0d1117', ec='#fbbf2440', lw=0.5))
+        ax_price.annotate('', xy=(e_i, lv), xytext=(s_i, hv),
+                          arrowprops=dict(arrowstyle='<->', color=MA20_C, lw=1.0))
+        ax_price.text(mid_x, mid_y, f'{rng:.0f}%', color=MA20_C,
+                      fontsize=7, ha='center', va='center', zorder=6,
+                      bbox=dict(boxstyle='round,pad=0.2', fc=LABEL_BG, ec=MA20_C + '80', lw=0.6))
 
     # ── BREAKOUT / PIVOT HIGH LEVEL ───────────────────────────────────────────
     if pivot_high and pivot_high > 0:
-        piv_disp = bars - (entry.get('pivot_bars_ago') or bars)
-        if 0 <= piv_disp < n:
-            ax_price.axhline(pivot_high, color=PIVOT_C, linewidth=1.0,
-                             linestyle='-', alpha=0.85, zorder=4)
-            ax_price.text(n - 1, pivot_high, f' Pivot {pivot_high:,.0f}',
-                          color=PIVOT_C, fontsize=6.5, va='center', ha='left')
-            if pivot_crossed:
-                ax_price.annotate('▲ BREAKOUT', xy=(n-1, cl[-1]),
-                                  xytext=(n - 10, cl[-1] * 1.02),
-                                  color=UP_C, fontsize=7, fontweight='bold',
-                                  arrowprops=dict(arrowstyle='->', color=UP_C, lw=0.8))
+        piv_ago = entry.get(pivot_bars_ago_key) or 0
+        piv_x   = max(0, n - 1 - int(piv_ago)) if piv_ago else 0
+        lw_piv  = 2.2 if weekly else 1.6
+
+        # Dashed line from pivot bar to the right edge
+        ax_price.hlines(pivot_high, piv_x, n + 1,
+                        color=PIVOT_C, linewidth=lw_piv,
+                        linestyle='--', alpha=0.95, zorder=5)
+
+        # Triangle marker at pivot bar (Pine Script style)
+        tri_x = min(piv_x, n - 1)
+        ax_price.scatter([tri_x], [pivot_high * 1.004],
+                         color=PIVOT_C, s=48, marker='v', zorder=7, linewidths=0)
+
+        # Inline price box just above triangle
+        ax_price.text(tri_x, pivot_high * 1.016, f'{pivot_high:,.2f}',
+                      color=PIVOT_C, fontsize=8, fontweight='bold',
+                      ha='center', va='bottom', zorder=8, clip_on=True,
+                      bbox=dict(boxstyle='round,pad=0.25', fc=LABEL_BG, ec=PIVOT_C, lw=1.2, alpha=0.95))
+
+        # Right-margin pivot label
+        tag = f'{"W-Piv" if weekly else "Pivot"}  {pivot_high:,.2f}'
+        ax_price.annotate(
+            tag,
+            xy=(1.0, pivot_high), xycoords=('axes fraction', 'data'),
+            xytext=(8, 0), textcoords='offset points',
+            ha='left', va='center', fontsize=7.5, fontweight='bold',
+            color=BG, clip_on=False, zorder=8,
+            bbox=dict(boxstyle='round,pad=0.32', fc=PIVOT_C, ec=PIVOT_C, alpha=0.97)
+        )
+
+        # Shaded buy zone
+        ax_price.axhspan(pivot_high * 0.97, pivot_high * 1.02,
+                         color=PIVOT_C, alpha=0.07, zorder=3)
+
+        if pivot_crossed:
+            ax_price.annotate(
+                '▲ BREAKOUT',
+                xy=(n - 1, cl[-1]),
+                xytext=(max(4, n - 14), cl[-1] * 1.025),
+                color=UP_C, fontsize=9, fontweight='bold', zorder=8,
+                arrowprops=dict(arrowstyle='->', color=UP_C, lw=1.0)
+            )
+
+    # ── CURRENT PRICE LEVEL ───────────────────────────────────────────────────
+    cur_price = float(cl[-1])
+    ax_price.hlines(cur_price, 0, n - 1,
+                    color=MUTED_C, linewidth=0.5, linestyle=(0, (2, 4)), alpha=0.6, zorder=4)
+    ax_price.annotate(
+        f' {cur_price:,.2f} ',
+        xy=(1.0, cur_price), xycoords=('axes fraction', 'data'),
+        xytext=(8, 0), textcoords='offset points',
+        ha='left', va='center', fontsize=8, fontweight='bold',
+        color=BG, clip_on=False, zorder=9,
+        bbox=dict(boxstyle='square,pad=0.25', fc=TEXT_C, ec=TEXT_C, alpha=0.97)
+    )
 
     # ── AXES STYLING ──────────────────────────────────────────────────────────
-    for ax in [ax_price, ax_vol]:
-        ax.set_facecolor(BG)
-        ax.tick_params(colors=TEXT_C, labelsize=6)
-        ax.spines[:].set_color(GRID_C)
+    for ax in (ax_price, ax_vol):
+        ax.set_facecolor(PANEL)
+        ax.tick_params(
+            colors=MUTED_C, labelsize=7.5, length=3, width=0.4, pad=4,
+            left=False, right=True, labelleft=False, labelright=True
+        )
+        for spine in ax.spines.values():
+            spine.set_color(GRID_C)
+            spine.set_linewidth(0.6)
         ax.yaxis.set_label_position('right')
         ax.yaxis.tick_right()
-        for spine in ax.spines.values():
-            spine.set_linewidth(0.4)
 
-    ax_price.grid(True, color=GRID_C, linewidth=0.3, alpha=0.6)
-    ax_vol.grid(True, color=GRID_C, linewidth=0.3, alpha=0.4)
-    ax_price.set_xlim(-1, n + 2)
+    # Light horizontal grid (TradingView style)
+    ax_price.yaxis.grid(True, color=GRID_C, linewidth=0.5, alpha=0.9)
+    ax_price.xaxis.grid(False)
+    ax_vol.yaxis.grid(False)
+    ax_vol.xaxis.grid(False)
+
+    ax_price.set_xlim(-1, n + 1)
     ax_price.yaxis.set_major_formatter(mticker.FuncFormatter(
-        lambda x, _: f'{x:,.0f}' if x >= 1000 else f'{x:.1f}'
+        lambda x, _: f'{x:,.0f}' if x >= 1000 else f'{x:.2f}'
     ))
+    ax_price.tick_params(axis='y', colors=MUTED_C, labelsize=7.5)
     ax_vol.set_yticks([])
     plt.setp(ax_price.get_xticklabels(), visible=False)
 
-    # Date x-ticks on volume axis
-    step = max(1, n // 6)
-    tick_idx = list(range(0, n, step))
+    # Date x-ticks
+    step = max(1, n // 8)
+    tick_idx = sorted(set(list(range(0, n, step)) + [n - 1]))
+    fmt = "%b '%y" if weekly else '%d %b'
     ax_vol.set_xticks(tick_idx)
     ax_vol.set_xticklabels(
-        [df.index[i].strftime('%b %d') for i in tick_idx],
-        color=TEXT_C, fontsize=5.5
+        [df.index[i].strftime(fmt) for i in tick_idx],
+        color=MUTED_C, fontsize=7, ha='center'
     )
 
-    # ── HEADER TEXT ───────────────────────────────────────────────────────────
-    price_str  = f"{'$' if is_us else '₹'}{cl[-1]:,.2f}"
-    pct_h_str  = f"{pct_hi:+.1f}%" if pct_hi is not None else ''
-    rs_str     = f"RS {entry.get('rs_rank', '?')}"
-    passed_str = f"{passed}/8"
-    tf_str     = 'W' if weekly else 'D'
+    # ── HEADER BAND ───────────────────────────────────────────────────────────
+    fig.add_artist(Line2D([0, 1], [0.88, 0.88], transform=fig.transFigure,
+                          color=GRID_C, linewidth=0.8, solid_capstyle='butt'))
 
-    # Map pattern name → colour (6-char hex only so we can append alpha suffix)
-    _PAT_COLORS = {
-        'BREAKOUT':           '#3fb950',
-        'NEAR BREAKOUT':      '#26a641',
-        'CUP & HANDLE':       '#fbbf24',
-        'DOUBLE BOTTOM':      '#60a5fa',
-        'ASCENDING TRIANGLE': '#a78bfa',
-        'BULL FLAG':          '#fb923c',
-        'TIGHT BASE':         '#fbbf24',
-        'STAGE 2':            '#a78bfa',
-        'VCP':                '#fbbf24',
-        'WATCH':              '#94a3b8',
-    }
-    label_color = _PAT_COLORS.get(pat_name, '#94a3b8')
+    # Ticker + timeframe
+    fig.text(0.012, 0.982, ticker,
+             color=TEXT_C, fontsize=15, fontweight='bold', va='top', ha='left',
+             fontfamily='monospace')
+    tf_x = 0.012 + len(ticker) * 0.0128 + 0.005
+    fig.text(tf_x, 0.983, f'[{tf_str}]',
+             color=MUTED_C, fontsize=8, va='top', ha='left', fontfamily='monospace')
 
-    ax_price.text(0.01, 0.97, ticker, transform=ax_price.transAxes,
-                  color=TEXT_C, fontsize=11, fontweight='bold', va='top')
-    ax_price.text(0.01, 0.87, price_str,
-                  transform=ax_price.transAxes, color=TEXT_C, fontsize=8, va='top',
-                  fontfamily='monospace')
-    ax_price.text(0.01, 0.80,
-                  f'{pct_h_str} from high  {rs_str}  {passed_str}  [{tf_str}]',
-                  transform=ax_price.transAxes, color='#94a3b8', fontsize=6.5, va='top')
-    # Pattern badge (top-right)
-    badge_text = f'{pat_name}  {pat_conf}%'
-    ax_price.text(0.99, 0.97, badge_text, transform=ax_price.transAxes,
-                  color=label_color, fontsize=7, fontweight='bold', va='top', ha='right',
-                  bbox=dict(boxstyle='round,pad=0.3', fc=BG, ec=label_color + '55', lw=0.6))
-    # Pattern note (below badge)
-    if pat_note:
-        ax_price.text(0.99, 0.88, pat_note, transform=ax_price.transAxes,
-                      color='#94a3b8', fontsize=5.5, va='top', ha='right')
+    # Price + pct from high inline
+    price_color = UP_C if (len(cl) > 1 and cl[-1] >= cl[-2]) else DN_C
+    fig.text(tf_x + 0.045, 0.983, price_str,
+             color=price_color, fontsize=11, fontweight='bold', va='top', ha='left',
+             fontfamily='monospace')
+    if pct_h_str:
+        fig.text(tf_x + 0.045 + 0.085, 0.983, pct_h_str,
+                 color=MUTED_C, fontsize=8.5, va='top', ha='left', fontfamily='monospace')
+
+    # RS + criteria right of price
+    fig.text(tf_x + 0.045 + 0.135, 0.983,
+             f'{rs_str}   {passed_str}',
+             color=MUTED_C, fontsize=8, va='top', ha='left', fontfamily='monospace')
 
     # MA legend
-    ma_label1 = 'MA10' if weekly else 'MA20'
-    ma_label2 = 'MA26' if weekly else 'MA50'
-    ma_label3 = 'MA52' if weekly else 'MA200'
-    legend_els = [
-        Line2D([0],[0], color=MA20_C,  lw=1,   label=ma_label1),
-        Line2D([0],[0], color=MA50_C,  lw=1,   label=ma_label2),
-        Line2D([0],[0], color=MA200_C, lw=0.8, label=ma_label3, linestyle='--'),
+    leg_items = [
+        (f'─ {ma_label1}', MA20_C),
+        (f'─ {ma_label2}', MA50_C),
+        (f'╌ {ma_label3}', MA200_C),
     ]
-    ax_price.legend(handles=legend_els, loc='lower left', fontsize=5.5,
-                    facecolor=BG, edgecolor=GRID_C, labelcolor=TEXT_C, framealpha=0.8)
+    lx = 0.62
+    for lbl, col in leg_items:
+        fig.text(lx, 0.983, lbl, color=col, fontsize=8, va='top', fontfamily='monospace')
+        lx += 0.082
 
-    # ── AI VISUAL ANALYSIS OVERLAY (enabled by --ai-analysis flag) ──────────────
-    # Note: chart is saved FIRST (so vision model can read the PNG), then overlay
-    # is skipped here — AI results are stored in JSON and shown in the viewer instead.
-    # The overlay on-chart is done in run_ai_on_screen() after the PNG exists.
+    # Pattern badge
+    badge_text = f'  {pat_name}  {pat_conf}%  '
+    fig.text(0.955, 0.983, badge_text,
+             color=label_color, fontsize=8.5, fontweight='bold', va='top', ha='center',
+             bbox=dict(boxstyle='round,pad=0.38', fc=LABEL_BG, ec=label_color, lw=1.2, alpha=0.97))
+    if pat_note:
+        fig.text(0.955, 0.917, pat_note,
+                 color=MUTED_C, fontsize=6.5, va='top', ha='center')
 
     # ── SAVE ──────────────────────────────────────────────────────────────────
     out_path = os.path.join(out_dir, f'{ticker}{suffix}.png')
-    plt.savefig(out_path, dpi=DPI, bbox_inches='tight', pad_inches=0,
-                facecolor=BG, edgecolor='none')
+    plt.savefig(out_path, dpi=DPI, facecolor=BG, edgecolor='none', bbox_inches='tight')
     plt.close(fig)
     return out_path
 
@@ -1933,23 +2170,83 @@ Daily workflow (run every morning after scanner):
         )
         us_data.update(extra_us)
 
+    # ── Near Weekly Pivot — dedicated server-side screen ─────────────────────
+    # Scans ALL stocks in results.json (full universe), not just those in
+    # pattern screens. Generates _W.png with pivot line for each qualifier.
+    if args.market in ('india', 'both'):
+        print("\n=== INDIA — Near Weekly Pivot Screen ===")
+        india_data['near_weekly_pivot'] = build_near_weekly_pivot(
+            INDIA_JSON, INDIA_CACHE, OUT_INDIA, args.bars, is_us=False,
+            manifest=manifest if args.daily else None,
+            existing_data=india_data if args.daily else None,
+        )
+    if args.market in ('us', 'both'):
+        print("\n=== US — Near Weekly Pivot Screen ===")
+        us_data['near_weekly_pivot'] = build_near_weekly_pivot(
+            US_JSON, US_CACHE, OUT_US, args.bars, is_us=True,
+            manifest=manifest if args.daily else None,
+            existing_data=us_data if args.daily else None,
+        )
+
     # ── AI batch analysis on priority screens ─────────────────────────────────
     if args.ai_analysis and _AI_ENABLED and args.ai_top > 0:
         print(f"\n=== AI ANALYSIS (top {args.ai_top} per priority screen) ===")
+        today_str = str(datetime.date.today())
+        # Global dedup: share ai result across screens so each ticker is only analysed once
+        _ai_cache = {}  # ticker -> ai dict
+
+        def _run_ai_deduped(scr, cache_dir, out_dir, is_us, bars, ai_top, weekly):
+            stocks = scr.get('stocks', [])
+            candidates = [s for s in stocks
+                          if not (isinstance(s.get('ai'), dict) and s['ai'].get('date') == today_str)]
+            candidates = candidates[:ai_top]
+            if not candidates:
+                print(f"    (all {len(stocks)} already analysed today)", flush=True)
+                return
+            # Reuse already-computed results from earlier screens
+            fresh = []
+            for s in candidates:
+                t = s.get('ticker', '')
+                if t in _ai_cache:
+                    s['ai'] = _ai_cache[t]
+                else:
+                    fresh.append(s)
+            if fresh:
+                run_ai_on_screen({'stocks': fresh}, cache_dir, out_dir, is_us, bars, len(fresh), weekly)
+                for s in fresh:
+                    if s.get('ai'):
+                        _ai_cache[s['ticker']] = s['ai']
+
         for key, scr in india_data.items():
             if key in AI_PRIORITY_SCREENS:
                 weekly = EXTRA_SCREENS_DEF.get(key, {}).get('weekly', False)
                 print(f"  {key} ({scr['label']})…")
-                run_ai_on_screen(scr, INDIA_CACHE, OUT_INDIA, False, args.bars, args.ai_top, weekly)
+                _run_ai_deduped(scr, INDIA_CACHE, OUT_INDIA, False, args.bars, args.ai_top, weekly)
         for key, scr in us_data.items():
             if key in AI_PRIORITY_SCREENS:
                 weekly = EXTRA_SCREENS_DEF.get(key, {}).get('weekly', False)
                 print(f"  {key} US ({scr['label']})…")
-                run_ai_on_screen(scr, US_CACHE, OUT_US, True, args.bars, args.ai_top, weekly)
+                _run_ai_deduped(scr, US_CACHE, OUT_US, True, args.bars, args.ai_top, weekly)
 
     # ── Save manifest ─────────────────────────────────────────────────────────
     if args.daily:
         save_manifest(manifest)
+
+    # ── Build AI Picks screens (BUY-rated stocks, sorted by confidence) ──────
+    def _build_ai_picks(data):
+        picks = []
+        seen  = set()
+        for scr in data.values():
+            for s in scr.get('stocks', []):
+                ai = s.get('ai') or {}
+                if ai.get('action') == 'BUY' and s.get('ticker') not in seen:
+                    picks.append(s)
+                    seen.add(s.get('ticker'))
+        picks.sort(key=lambda s: (s.get('ai') or {}).get('conf') or 0, reverse=True)
+        return {'label': 'AI Minervini Picks', 'stocks': picks}
+
+    india_data['ai_picks'] = _build_ai_picks(india_data)
+    us_data['ai_picks']    = _build_ai_picks(us_data)
 
     # ── Write JSON data files ─────────────────────────────────────────────────
     with open(os.path.join(SCRIPT_DIR, 'india_data.json'), 'w') as f:
