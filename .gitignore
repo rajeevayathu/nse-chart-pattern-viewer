@@ -10,3 +10,16 @@ india_screens.xlsx
 us_screens.xlsx
 *.xlsx
 .DS_Store
+
+# Runtime price data (updated every session)
+live_prices.json
+live_prices_us.json
+
+# Binary index (rebuilt on demand)
+*.pkl
+
+# Dated screen snapshots
+screen_snapshot_*.json
+
+# Test files
+test.html

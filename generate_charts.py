@@ -111,8 +111,8 @@ def detect_vcp_contractions(close, high, low, lookback=60):
     l = np.array(low[-lookback:], dtype=float)
     offset = max(0, len(close) - lookback)
 
-    ph = find_pivot_highs(h, left=5, right=5, lookback=lookback)
-    pl = find_pivot_lows(l,  left=5, right=5, lookback=lookback)
+    ph = find_pivot_highs(h, left=10, right=10, lookback=lookback)
+    pl = find_pivot_lows(l,  left=10, right=10, lookback=lookback)
 
     # pair each pivot high with nearest following pivot low
     contractions = []
@@ -796,6 +796,165 @@ def detect_first_pullback(df):
     return ma50 is None or price > ma50
 
 
+def detect_higher_low_pivot(df):
+    """
+    Strong uptrend stock that just formed a confirmed new higher low pivot.
+    Conditions:
+      - Price > MA50 > MA200 (uptrend structure intact)
+      - Two recent confirmed pivot lows where the newer one is >2% higher
+      - The new pivot low confirmed within the last 20 bars (fresh)
+      - Price has bounced above the pivot (not still sitting at the low)
+      - Not too extended from the pivot yet (<15%), catching the early bounce
+    """
+    c  = df['Close'].values
+    lo = df['Low'].values
+    if len(c) < 60:
+        return False
+
+    price = float(c[-1])
+    ma50  = float(np.mean(c[-50:])) if len(c) >= 50 else None
+    ma200 = float(np.mean(c[-200:])) if len(c) >= 200 else None
+
+    # Must be in uptrend: price above MA50, MA50 above MA200
+    if ma50 is None or price < ma50:
+        return False
+    if ma200 is not None and ma50 < ma200:
+        return False
+
+    # Find pivot lows — left=10, right=10 filters out minor pullbacks (matches chart drawing standard)
+    pls = find_pivot_lows(lo, left=10, right=10, lookback=200)
+    if len(pls) < 2:
+        return False
+
+    pl_new  = pls[-1]  # most recent confirmed pivot low (abs_index, price)
+    pl_prev = pls[-2]  # prior pivot low
+
+    # Genuine higher low: new pivot must be >2% above previous
+    if (pl_new[1] / pl_prev[1] - 1) * 100 < 2:
+        return False
+
+    # New pivot must be fresh — confirmed within last 20 bars
+    bars_since_new = len(c) - pl_new[0]
+    if bars_since_new > 20:
+        return False
+
+    # Prior pivot must be within 120 bars (same trend leg, not ancient history)
+    bars_since_prev = len(c) - pl_prev[0]
+    if bars_since_prev > 120:
+        return False
+
+    # Price bouncing: must be above the new pivot low
+    if price <= pl_new[1] * 1.005:
+        return False
+
+    # Not already too extended from the pivot (early bounce only, <15%)
+    pct_above = (price / pl_new[1] - 1) * 100
+    if pct_above > 15:
+        return False
+
+    return True
+
+
+def detect_cci_best_setups(df, rs=0):
+    """
+    Minervini candidate (full 8/8 template OR within 5% of 52W high)
+    AND CCI34 >= 100 on daily OR weekly timeframe.
+    Mirrors scanner 'cci34_best_setups' screen.
+    """
+    c = df['Close'].values.flatten().astype(float)
+    h = df['High'].values.flatten().astype(float)
+    l = df['Low'].values.flatten().astype(float)
+    if len(c) < 210:
+        return False
+
+    price    = c[-1]
+    ma50     = float(np.mean(c[-50:]))
+    ma150    = float(np.mean(c[-150:]))
+    ma200    = float(np.mean(c[-200:]))
+    ma200_1m = float(np.mean(c[-221:-21])) if len(c) >= 221 else ma200
+    hi52     = float(np.max(h[-252:])) if len(h) >= 252 else float(np.max(h))
+    lo52     = float(np.min(l[-252:])) if len(l) >= 252 else float(np.min(l))
+
+    # Full template (c1–c8)
+    c1 = price > ma150 and price > ma200
+    c2 = ma150 > ma200
+    c3 = ma200 > ma200_1m
+    c4 = ma50 > ma150 and ma50 > ma200
+    c5 = price > ma50
+    c6 = lo52 > 0 and price >= lo52 * 1.25
+    c7 = hi52 > 0 and price >= hi52 * 0.75
+    c8 = rs >= 70
+    full = c1 and c2 and c3 and c4 and c5 and c6 and c7 and c8
+
+    # Near breakout: within 5% of 52W high (even without full template)
+    near_bo = hi52 > 0 and price >= hi52 * 0.95
+
+    if not (full or near_bo):
+        return False
+
+    # CCI34 >= 100 on daily OR weekly
+    return detect_cci_daily_above(df) or detect_cci_weekly_above(df)
+
+
+def detect_ath_leaders(df):
+    """
+    Price within 5% of all-time high (full history).
+    Mirrors the scanner dashboard 'All-Time Highs' view: pct_from_ath >= -5%.
+    Minimal trend filter: price > MA200 to exclude pump-and-dump spikes.
+    """
+    c = df['Close'].values.flatten().astype(float)
+    h = df['High'].values.flatten().astype(float)
+    if len(c) < 60:
+        return False
+
+    price = c[-1]
+    ma200 = float(np.mean(c[-200:])) if len(c) >= 200 else float(np.mean(c))
+    if price < ma200:
+        return False
+
+    ath = float(np.max(h))
+    return ath > 0 and price >= ath * 0.95
+
+
+def detect_higher_low_pivot_any_ext(df):
+    """
+    Same as detect_higher_low_pivot but no upper extension limit —
+    catches stocks that have already moved well above their pivot low.
+    """
+    c  = df['Close'].values
+    lo = df['Low'].values
+    if len(c) < 60:
+        return False
+
+    price = float(c[-1])
+    ma50  = float(np.mean(c[-50:])) if len(c) >= 50 else None
+    ma200 = float(np.mean(c[-200:])) if len(c) >= 200 else None
+
+    if ma50 is None or price < ma50:
+        return False
+    if ma200 is not None and ma50 < ma200:
+        return False
+
+    pls = find_pivot_lows(lo, left=10, right=10, lookback=200)
+    if len(pls) < 2:
+        return False
+
+    pl_new  = pls[-1]
+    pl_prev = pls[-2]
+
+    if (pl_new[1] / pl_prev[1] - 1) * 100 < 2:
+        return False
+    if (len(c) - pl_new[0]) > 20:
+        return False
+    if (len(c) - pl_prev[0]) > 120:
+        return False
+    if price <= pl_new[1] * 1.005:
+        return False
+
+    # No upper extension limit
+    return True
+
+
 EXTRA_SCREENS_DEF = {
     # CCI screens — weekly variants get weekly charts
     'cci_daily_cross':   {'label': 'CCI Daily Crossed 100',        'fn': lambda df, rs: detect_cci_daily_cross(df),   'weekly': False},
@@ -815,6 +974,9 @@ EXTRA_SCREENS_DEF = {
     'rs_leader_high':    {'label': 'RS Leader Near 52W High',      'fn': lambda df, rs: detect_rs_new_high(df, rs),   'weekly': False},
     'momentum_bo':       {'label': 'Momentum Breakout (20D High)', 'fn': lambda df, rs: detect_momentum_breakout(df), 'weekly': False},
     'first_pullback':    {'label': '1st Pullback to MA20',         'fn': lambda df, rs: detect_first_pullback(df),    'weekly': False},
+    'higher_low_pivot':  {'label': 'Higher Low Pivot',              'fn': lambda df, rs: detect_higher_low_pivot(df),         'weekly': False},
+    'hl_pivot_any_ext':  {'label': 'Higher Low Pivot (Any Ext)',   'fn': lambda df, rs: detect_higher_low_pivot_any_ext(df), 'weekly': False},
+    'ath_leaders':       {'label': 'All-Time High Leaders',        'fn': lambda df, rs: detect_ath_leaders(df),              'weekly': False},
 }
 
 
@@ -997,8 +1159,29 @@ def build_near_weekly_pivot(results_json, cache_dir, out_dir, bars,
 
 # ── CHART GENERATOR ───────────────────────────────────────────────────────────
 
+def _load_live_prices():
+    """Return (india_prices_dict, us_prices_dict) from live price JSON files."""
+    india, us = {}, {}
+    try:
+        india = json.load(open(os.path.join(SCRIPT_DIR, 'live_prices.json'))).get('prices', {})
+    except Exception:
+        pass
+    try:
+        us = json.load(open(os.path.join(SCRIPT_DIR, 'live_prices_us.json'))).get('prices', {})
+    except Exception:
+        pass
+    return india, us
+
+# Loaded once at module level for all load_df calls in this run
+_LIVE_INDIA, _LIVE_US = _load_live_prices()
+
+
 def load_df(ticker, cache_dir, is_us=False):
-    """Load cached OHLCV DataFrame for a ticker."""
+    """Load cached OHLCV DataFrame for a ticker.
+
+    Patches today's bar from live_prices.json when the yfinance daily close
+    is NaN (Yahoo Finance lags ~1 trading day before publishing daily close).
+    """
     if is_us:
         fname = ticker.replace('-','_').replace('.','_') + '.pkl'
     else:
@@ -1014,6 +1197,31 @@ def load_df(ticker, cache_dir, is_us=False):
         df = df[['Open','High','Low','Close','Volume']].dropna()
         if len(df) < 60:
             return None
+
+        # ── Patch today's bar if yfinance daily close is lagging ────────────
+        live_map   = _LIVE_US if is_us else _LIVE_INDIA
+        live_entry = live_map.get(ticker)
+        if live_entry:
+            from datetime import timezone as _tz, timedelta as _td
+            tz_info = _tz(_td(hours=-4)) if is_us else _tz(_td(hours=5, minutes=30))
+            today   = datetime.datetime.now(tz_info).date()
+            last_date = df.index[-1]
+            last_date_d = last_date.date() if hasattr(last_date, 'date') else last_date
+            if last_date_d < today:
+                live_p  = float(live_entry['price'])
+                prev_c  = float(df['Close'].iloc[-1])
+                # Build a synthetic today bar using live price
+                idx_tz  = df.index.tz
+                today_ts = pd.Timestamp(today).tz_localize(idx_tz) if idx_tz else pd.Timestamp(today)
+                today_row = pd.DataFrame({
+                    'Open':   [prev_c],
+                    'High':   [max(prev_c, live_p)],
+                    'Low':    [min(prev_c, live_p)],
+                    'Close':  [live_p],
+                    'Volume': [int(live_entry.get('volume', 0))],
+                }, index=[today_ts])
+                df = pd.concat([df, today_row])
+
         return df
     except Exception:
         return None
@@ -2079,7 +2287,7 @@ Daily workflow (run every morning after scanner):
         else:
             print("⚠  Ollama not reachable. Start with: ollama serve")
 
-    INDIA_SCREENS = ['full_template','near_breakout','vcp_setup','high_ma20','rs_leaders','new_highs']
+    INDIA_SCREENS = ['full_template','near_breakout','vcp_setup','high_ma20','rs_leaders','new_highs','cci34_best_setups']
     US_SCREENS    = ['full_template','near_breakout','vcp_setup','high_ma20','rs_leaders','near_base_pivot']
 
     # ── Load manifest + existing JSON ────────────────────────────────────────
@@ -2245,18 +2453,31 @@ Daily workflow (run every morning after scanner):
         picks.sort(key=lambda s: (s.get('ai') or {}).get('conf') or 0, reverse=True)
         return {'label': 'AI Minervini Picks', 'stocks': picks}
 
-    india_data['ai_picks'] = _build_ai_picks(india_data)
-    us_data['ai_picks']    = _build_ai_picks(us_data)
+    # ── Patch prices from live_prices files (scanner captures mid-session prices) ─
+    def _patch_data_prices(data, live_prices_dict):
+        """Replace scanner-embedded prices with end-of-session prices from live_prices.json."""
+        for scr in data.values():
+            for s in scr.get('stocks', []):
+                t = s.get('ticker', '')
+                lp = live_prices_dict.get(t)
+                if lp:
+                    s['price'] = lp['price']
 
-    # ── Write JSON data files ─────────────────────────────────────────────────
-    with open(os.path.join(SCRIPT_DIR, 'india_data.json'), 'w') as f:
-        json.dump(india_data, f, default=str)
-    with open(os.path.join(SCRIPT_DIR, 'us_data.json'), 'w') as f:
-        json.dump(us_data, f, default=str)
+    _patch_data_prices(india_data, _LIVE_INDIA)
+    _patch_data_prices(us_data,    _LIVE_US)
 
-    # ── Excel export (one sheet per screen) ───────────────────────────────────
-    export_excel(india_data, os.path.join(SCRIPT_DIR, 'india_screens.xlsx'), market='India')
-    export_excel(us_data,    os.path.join(SCRIPT_DIR, 'us_screens.xlsx'),    market='US')
+    # ── Write JSON + Excel — only for markets that were actually processed ──────
+    if args.market in ('india', 'both'):
+        india_data['ai_picks'] = _build_ai_picks(india_data)
+        with open(os.path.join(SCRIPT_DIR, 'india_data.json'), 'w') as f:
+            json.dump(india_data, f, default=str)
+        export_excel(india_data, os.path.join(SCRIPT_DIR, 'india_screens.xlsx'), market='India')
+
+    if args.market in ('us', 'both'):
+        us_data['ai_picks'] = _build_ai_picks(us_data)
+        with open(os.path.join(SCRIPT_DIR, 'us_data.json'), 'w') as f:
+            json.dump(us_data, f, default=str)
+        export_excel(us_data, os.path.join(SCRIPT_DIR, 'us_screens.xlsx'), market='US')
 
     elapsed = (datetime.datetime.now() - t0).seconds
     total   = sum(len(v['stocks']) for v in india_data.values()) + \

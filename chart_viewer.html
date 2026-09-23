@@ -120,6 +120,20 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);
   padding:8px 14px 4px;font-size:9px;font-weight:700;color:var(--muted);
   text-transform:uppercase;letter-spacing:.1em;
 }
+/* ── CCI panel ─────────────────────────────────────────────────────────────── */
+.cci-panel{padding:8px 10px 10px;background:var(--surface2);margin:2px 6px;border-radius:8px;border:1px solid var(--border)}
+.cci-panel-title{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;padding-left:2px}
+.cci-tiles{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.cci-tile{
+  background:var(--surface3);border:1px solid var(--border);border-radius:6px;
+  padding:6px 8px;cursor:pointer;transition:all .12s;text-align:center;
+}
+.cci-tile:hover{border-color:var(--amber);background:var(--amber-dim)}
+.cci-tile.active{border-color:var(--amber);background:var(--amber-dim)}
+.cci-tile-mtf{grid-column:1/-1;background:rgba(245,200,66,.06)}
+.cci-tile-mtf:hover,.cci-tile-mtf.active{background:var(--amber-dim)}
+.cci-tile-cnt{font-family:var(--mono);font-size:16px;font-weight:800;color:var(--amber);line-height:1}
+.cci-tile-lbl{font-size:9px;color:var(--muted2);margin-top:3px;font-weight:600}
 .sitem{
   display:flex;align-items:center;justify-content:space-between;
   padding:6px 12px 6px 14px;cursor:pointer;transition:background .1s;
@@ -333,6 +347,23 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);
 .ai-banner .ai-pat{font-size:13px;font-weight:800;font-family:var(--mono)}
 .ai-banner .ai-note{color:var(--muted2);font-weight:400;font-size:10px}
 
+/* ── LIVE PRICE BADGE ─────────────────────────────────────────────────────── */
+#live-badge{
+  display:inline-flex;align-items:center;gap:5px;padding:3px 9px;
+  border-radius:12px;font-size:10px;font-weight:700;letter-spacing:.04em;
+  border:1px solid var(--border2);color:var(--muted2);background:transparent;
+  font-family:var(--mono);white-space:nowrap;transition:all .3s;flex-shrink:0;
+}
+#live-badge.live{border-color:var(--green);color:var(--green);background:var(--green-dim)}
+#live-badge .dot{
+  width:6px;height:6px;border-radius:50%;background:var(--muted2);flex-shrink:0;
+  transition:background .3s;
+}
+#live-badge.live .dot{background:var(--green);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.card-change{font-size:9px;font-weight:700;margin-left:4px;font-family:var(--mono)}
+.card-change.up{color:var(--green)}.card-change.dn{color:var(--red)}
+
 /* ── LOADING ──────────────────────────────────────────────────────────────── */
 .loading{
   display:flex;align-items:center;justify-content:center;gap:10px;
@@ -389,6 +420,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);
       <button class="col-btn" data-c="5" onclick="setCols(this)">5</button>
     </div>
   </div>
+  <div id="live-badge" title="Live price feed status"><span class="dot"></span><span id="live-time">LOADING</span></div>
 </div>
 
 <!-- LAYOUT -->
@@ -449,11 +481,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);
 var market = 'india', currentScreen = null, chipFilter = 'all';
 var displayedStocks = [], modalIdx = 0;
 var SCREENS_INDIA = {}, SCREENS_US = {}, colCount = 4;
+// Cache-bust chart images once per session (forces fresh PNG after regeneration)
+var IMG_VER = '?v=' + Math.floor(Date.now() / 60000);  // changes every minute
 
 // ── BOOT ────────────────────────────────────────────────────────────────────
 Promise.all([
-  fetch('india_data.json').then(function(r){ return r.json(); }),
-  fetch('us_data.json').then(function(r){ return r.json(); })
+  fetch('india_data.json?_='+Date.now()).then(function(r){ return r.json(); }),
+  fetch('us_data.json?_='+Date.now()).then(function(r){ return r.json(); })
 ]).then(function(res){
   SCREENS_INDIA = res[0];
   SCREENS_US    = res[1];
@@ -487,6 +521,9 @@ function switchMarket(m){
   buildSidebar();
   var first = Object.keys(m==='india'?SCREENS_INDIA:SCREENS_US)[0];
   setScreen(first);
+  // Refresh live prices for the new market immediately
+  LIVE_PRICES = {};
+  fetchLivePrices();
 }
 
 // ── VIRTUAL SCREENS (built client-side from existing stock data) ──────────────
@@ -506,6 +543,30 @@ function getVirtualScreen(key){
     buys.sort(function(a,b){ return ((b.ai||{}).conf||0)-((a.ai||{}).conf||0); });
     return {label:'AI Minervini Picks', stocks:buys};
   }
+
+  if(key==='ath_leaders'){
+    // Stocks within 5% of all-time high, sorted by RS rank
+    var leaders = all.filter(function(s){
+      var v = s.pct_from_ath != null ? s.pct_from_ath : s.pct_from_high;
+      return v != null && v >= -5;
+    });
+    leaders.sort(function(a,b){ return (b.rs_rank||0)-(a.rs_rank||0); });
+    return {label:'All-Time High Leaders', stocks:leaders};
+  }
+
+  if(key==='near_high_ma20'){
+    // Within 8% of 52-wk high OR 10% of ATH AND price within 5% of 20MA
+    var setup = all.filter(function(s){
+      var fromHigh = s.pct_from_high != null && s.pct_from_high >= -8;
+      var fromAth  = (s.pct_from_ath  != null && s.pct_from_ath  >= -10) ||
+                     (s.pct_from_high != null && s.pct_from_high >= -10);
+      var nearMa   = s.pct_from_ma20  != null && Math.abs(s.pct_from_ma20) <= 5;
+      return (fromHigh || fromAth) && nearMa;
+    });
+    setup.sort(function(a,b){ return (b.rs_rank||0)-(a.rs_rank||0); });
+    return {label:'Near High & 20MA Setup', stocks:setup};
+  }
+
   return null;
 }
 
@@ -531,8 +592,36 @@ function buildSidebar(filterQ){
       +'<span class="sitem-cnt" style="background:'+dimColor+';color:'+color+'">'+(cnt||'—')+'</span>'
       +'</div>';
   }
+  // CCI summary tile panel
+  function _cciTile(key, label, subLabel){
+    var scr2 = screens[key];
+    var cnt  = scr2 ? (scr2.stocks||[]).length : 0;
+    var act  = currentScreen===key;
+    return '<div class="cci-tile'+(act?' active':'')+'" onclick="setScreen(\''+key+'\')" title="'+label+'">'
+      +'<div class="cci-tile-cnt">'+cnt+'</div>'
+      +'<div class="cci-tile-lbl">'+subLabel+'</div>'
+      +'</div>';
+  }
+  // MTF = stocks in both daily_above AND weekly_above
+  var dAbove = new Set(((screens['cci_daily_above']||{}).stocks||[]).map(function(s){return s.ticker;}));
+  var wAbove = new Set(((screens['cci_weekly_above']||{}).stocks||[]).map(function(s){return s.ticker;}));
+  var mtfCnt = 0; dAbove.forEach(function(t){ if(wAbove.has(t)) mtfCnt++; });
+
+  var cciPanel = '<div class="cci-panel">'
+    +'<div class="cci-panel-title">CCI Live (NSE Universe)</div>'
+    +'<div class="cci-tiles">'
+    +'<div class="cci-tile cci-tile-mtf'+(currentScreen==='cci_daily_above'?' active':'')+'" onclick="setScreen(\'cci_daily_above\')" title="Both Daily & Weekly ≥100">'
+      +'<div class="cci-tile-cnt">'+mtfCnt+'</div><div class="cci-tile-lbl">◆ MTF Both</div></div>'
+    +_cciTile('cci_daily_above',  'Daily CCI ≥ 100',  '▲ Daily ≥100')
+    +_cciTile('cci_weekly_above', 'Weekly CCI ≥ 100', '▲ Weekly ≥100')
+    +_cciTile('cci_daily_cross',  'Daily CCI × 100',  '⚡ Daily Cross')
+    +_cciTile('cci_weekly_cross', 'Weekly CCI × 100', '⚡ Weekly Cross')
+    +'</div></div>';
+
   var aiPicksHtml =
-    _pinnedItem('ai_picks',         '⚡', 'AI Picks',          'var(--green)', 'var(--green-dim)')
+    _pinnedItem('ath_leaders',      '🏆', 'ATH Leaders',       'var(--amber)', 'var(--amber-dim)')
+  + _pinnedItem('near_high_ma20',   '🎯', 'Near High & 20MA',  'var(--teal)',  'rgba(40,201,176,.10)')
+  + _pinnedItem('ai_picks',         '⚡', 'AI Picks',          'var(--green)', 'var(--green-dim)')
   + _pinnedItem('near_weekly_pivot','📅', 'Near Weekly Pivot', 'var(--blue)',  'var(--blue-dim)');
 
   Object.entries(screens).forEach(function(e){
@@ -551,7 +640,10 @@ function buildSidebar(filterQ){
     else                      extraHtml += item;
   });
 
-  var html = aiPicksHtml + '<div style="height:1px;background:var(--border);margin:4px 0"></div>';
+  var html = aiPicksHtml
+    + '<div style="height:1px;background:var(--border);margin:4px 0"></div>'
+    + cciPanel
+    + '<div style="height:1px;background:var(--border);margin:4px 0"></div>';
   if(baseHtml)  html += '<div class="screen-group">Base Screens</div>'+baseHtml;
   if(extraHtml) html += '<div class="screen-group">Pattern Screens</div>'+extraHtml;
   document.getElementById('screen-list').innerHTML = html || '<div class="empty" style="padding:20px">No screens match</div>';
@@ -583,8 +675,8 @@ function setCols(btn){
   grid.className = 'grid c'+colCount;
 }
 
-// near_weekly_pivot is now a real server-side screen; only ai_picks remains virtual
-var VIRTUAL_SCREENS = new Set(['ai_picks']);
+// Virtual screens: built client-side from aggregated data
+var VIRTUAL_SCREENS = new Set(['ai_picks','ath_leaders','near_high_ma20']);
 
 function applyFilter(){
   var screens = market==='india' ? SCREENS_INDIA : SCREENS_US;
@@ -676,7 +768,7 @@ function renderGrid(stocks){
     var pctH   = s.pct_from_high!=null ? (s.pct_from_high>0?'+':'')+s.pct_from_high.toFixed(1)+'%' : '';
     var hcol   = s.pct_from_high!=null&&s.pct_from_high>=-5 ? 'var(--green)' : 'var(--muted2)';
     var imgBase = s.ticker + (useWeekly ? '_W' : '') + '.png';
-    var imgSrc  = imgDir + '/' + imgBase;
+    var imgSrc  = imgDir + '/' + imgBase + IMG_VER;
     // Weekly pivot badge
     var wPivHtml = '';
     if(useWeekly && s.pivot_high_w){
@@ -695,7 +787,7 @@ function renderGrid(stocks){
     var patKey = lbl.replace(' ',''); // e.g. 'NEAR HIGH' -> 'NEARHIGH'
     var rsNum  = +(s.rs_rank||0);
     var rsCls  = rsNum>=85 ? 'rs-hi' : rsNum>=70 ? 'rs-mid' : 'rs-lo';
-    html += '<div class="card pat-'+patKey+'" onclick="openModal('+idx+')">'
+    html += '<div class="card pat-'+patKey+'" data-ticker="'+s.ticker+'" onclick="openModal('+idx+')">'
       +'<img class="card-img" src="'+imgSrc+'" alt="'+s.ticker+'" loading="lazy" onerror="this.classList.add(\'err\');var p=this.nextElementSibling;if(p)p.style.display=\'flex\'">'
       +'<div class="card-no-chart">No chart data</div>'
       +'<span class="card-badge '+cls+'">'+lbl+'</span>'
@@ -704,13 +796,15 @@ function renderGrid(stocks){
       +'<div class="card-foot">'
         +'<div>'
           +'<div class="card-ticker">'+s.ticker+'</div>'
-          +'<div class="card-sub">'+price+'<span style="color:'+hcol+';margin-left:5px">'+pctH+'</span></div>'
+          +'<div class="card-sub live-price">'+price+'<span style="color:'+hcol+';margin-left:5px">'+pctH+'</span></div>'
         +'</div>'
         +'<div class="rs-badge '+rsCls+'">RS&nbsp;'+rsNum+'</div>'
       +'</div>'
       +'</div>';
   });
   document.getElementById('grid').innerHTML = html;
+  // Apply any already-loaded live prices immediately after grid rebuild
+  if(Object.keys(LIVE_PRICES).length) refreshLivePricesInGrid();
 }
 
 // ── AI PICKS RENDERER ────────────────────────────────────────────────────────
@@ -733,7 +827,7 @@ function renderAIPicks(stocks, cur, imgDir){
     var aCol=colAct[ac]||'var(--muted2)';
     var rrVal=rr(s);
     var price=s.price!=null?cur+fmt(s.price,2):'—';
-    var imgSrc=imgDir+'/'+(s.img||s.ticker+'.png');
+    var imgSrc=imgDir+'/'+(s.img||s.ticker+'.png')+IMG_VER;
     var confBar=ai.conf?'<div style="height:3px;background:var(--border2);border-radius:2px;margin:6px 0 8px"><div style="height:100%;width:'+ai.conf+'%;background:'+aCol+';border-radius:2px;transition:width .4s"></div></div>':'';
 
     html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;transition:border-color .15s" onclick="openModal('+idx+')" onmouseover="this.style.borderColor=\''+aCol+'\'" onmouseout="this.style.borderColor=\'var(--border)\'">'
@@ -812,13 +906,17 @@ function _renderModal(){
   if(s.ai&&s.ai.action) stripeCol = {BUY:'var(--green)',WATCH:'var(--amber)',AVOID:'var(--red)'}[s.ai.action]||stripeCol;
   document.getElementById('m-stripe').style.background = stripeCol;
   var useWeeklyModal = WEEKLY_CHART_SCREENS.has(currentScreen);
-  document.getElementById('m-img').src = imgDir+'/'+(s.img||(s.ticker+(useWeeklyModal?'_W':'')+'.png'));
+  document.getElementById('m-img').src = imgDir+'/'+(s.img||(s.ticker+(useWeeklyModal?'_W':'')+'.png'))+IMG_VER;
   document.getElementById('m-pos').textContent = (modalIdx+1)+' / '+displayedStocks.length;
 
   var fmt = function(v,d){ return v!=null?(+v).toLocaleString('en',{minimumFractionDigits:d||0,maximumFractionDigits:d||0}):'—'; };
   var pct = function(v){ return v!=null?(v>0?'+':'')+v.toFixed(1)+'%':'—'; };
+  // Use live price if available, fall back to scanner price
+  var lp      = LIVE_PRICES[s.ticker];
+  var liveP   = lp ? lp.price : s.price;
+  var liveChg = lp ? ' <span style="font-size:11px;color:'+(lp.change_pct>=0?'var(--green)':'var(--red)')+'">('+(lp.change_pct>=0?'+':'')+lp.change_pct.toFixed(2)+'%)</span>' : '';
   var rows = [
-    {l:'Price',     v: s.price!=null?cur+fmt(s.price,2):'—'},
+    {l:'Price',     v: liveP!=null?(cur+fmt(liveP,2)+liveChg):'—'},
     {l:'RS Rank',   v: s.rs_rank||'—'},
     {l:'Criteria',  v: (s.passed||'?')+'/8'},
     {l:'From High', v: pct(s.pct_from_high)},
@@ -874,6 +972,113 @@ document.addEventListener('keydown', function(e){
   if(open && e.key==='ArrowLeft')  navModal(-1);
   if(open && e.key==='ArrowRight') navModal(1);
 });
+
+// ── LIVE PRICE FEED ──────────────────────────────────────────────────────────
+var LIVE_PRICES    = {};       // ticker → {price, prev_close, change_pct, change_abs}
+var _lastLiveEtag  = '';       // detect file changes without re-parsing identical data
+var _liveFailCount = 0;
+
+function fetchLivePrices(){
+  var file = (market === 'us') ? 'live_prices_us.json' : 'live_prices.json';
+  fetch(file + '?_=' + Date.now())
+    .then(function(r){
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.json();
+    })
+    .then(function(data){
+      _liveFailCount = 0;
+      LIVE_PRICES = data.prices || {};
+      var badge  = document.getElementById('live-badge');
+      var ltime  = document.getElementById('live-time');
+      var open   = data.market_open;
+      badge.className = open ? 'live' : '';
+      var timeStr = data.updated_str || '';
+      ltime.textContent = open
+        ? ('● LIVE  ' + timeStr)
+        : ('CLOSED · ' + timeStr);
+      refreshLivePricesInGrid();
+    })
+    .catch(function(){
+      _liveFailCount++;
+      var badge = document.getElementById('live-badge');
+      var ltime = document.getElementById('live-time');
+      if(_liveFailCount >= 3){
+        badge.className = '';
+        ltime.textContent = 'OFFLINE';
+      }
+    });
+}
+
+function refreshLivePricesInGrid(){
+  var cur = (market==='us') ? '$' : '₹';
+  document.querySelectorAll('.card[data-ticker]').forEach(function(card){
+    var ticker = card.getAttribute('data-ticker');
+    var lp = LIVE_PRICES[ticker];
+    if(!lp) return;
+    var sub = card.querySelector('.live-price');
+    if(!sub) return;
+    var p    = lp.price;
+    var chg  = lp.change_pct;
+    var chgCls = chg >= 0 ? 'up' : 'dn';
+    var chgStr = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+    var priceStr = cur + (+p).toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
+    sub.innerHTML = priceStr
+      + '<span class="card-change '+chgCls+'"> '+chgStr+'</span>';
+    // Also update the in-memory screen data so modal shows correct price
+    var screens = market==='india' ? SCREENS_INDIA : SCREENS_US;
+    Object.values(screens).forEach(function(scr){
+      (scr.stocks||[]).forEach(function(s){
+        if(s.ticker===ticker){ s.price=p; s._live_chg=chg; }
+      });
+    });
+  });
+}
+
+function startLiveFeed(){
+  var badge = document.getElementById('live-badge');
+  var ltime = document.getElementById('live-time');
+  // Initial state
+  if(isMarketHours()){
+    badge.className = 'live';
+    ltime.textContent = '● LIVE  —';
+  } else {
+    badge.className = '';
+    ltime.textContent = 'CLOSED';
+  }
+  fetchLivePrices();                        // immediate first fetch
+  setInterval(fetchLivePrices, 30000);      // then every 30 s
+}
+
+// Start feed after initial data load (hooked from boot promise)
+var _origBuildSidebar = buildSidebar;
+buildSidebar = function(){
+  _origBuildSidebar.apply(this, arguments);
+  // Only init once
+  if(!window._liveFeedStarted){
+    window._liveFeedStarted = true;
+    startLiveFeed();
+    startScreenRefresh();
+  }
+};
+
+// ── SCREEN DATA AUTO-REFRESH (every 5 min) ───────────────────────────────────
+function refreshScreenData(){
+  Promise.all([
+    fetch('india_data.json?_='+Date.now()).then(function(r){ return r.json(); }),
+    fetch('us_data.json?_='+Date.now()).then(function(r){ return r.json(); })
+  ]).then(function(res){
+    SCREENS_INDIA = res[0];
+    SCREENS_US    = res[1];
+    // Rebuild current view with fresh screen data
+    var savedScreen = currentScreen;
+    buildSidebar();
+    if(savedScreen) setScreen(savedScreen);
+  }).catch(function(){});  // silently ignore network errors
+}
+
+function startScreenRefresh(){
+  setInterval(refreshScreenData, 5 * 60 * 1000);  // every 5 min
+}
 </script>
 </body>
 </html>
