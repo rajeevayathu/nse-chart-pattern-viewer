@@ -244,7 +244,11 @@ def patch_india_data(prices: dict):
     except Exception:
         return
     changed = 0
-    for scr in data.values():
+    for key, scr in data.items():
+        # "_"-prefixed keys hold metadata (e.g. _sidebar, the sidebar layout),
+        # not screens — skip them.
+        if key.startswith('_') or not isinstance(scr, dict):
+            continue
         for s in scr.get('stocks', []):
             t = s.get('ticker', '')
             if t in prices:
@@ -315,7 +319,11 @@ def patch_us_data(prices: dict):
     except Exception:
         return
     changed = 0
-    for scr in data.values():
+    for key, scr in data.items():
+        # "_"-prefixed keys hold metadata (e.g. _sidebar, the sidebar layout),
+        # not screens — skip them.
+        if key.startswith('_') or not isinstance(scr, dict):
+            continue
         for s in scr.get('stocks', []):
             t = s.get('ticker', '')
             if t in prices:

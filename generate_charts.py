@@ -36,25 +36,33 @@ HTML_OUT     = os.path.join(SCRIPT_DIR, 'chart_viewer.html')
 CHART_W, CHART_H = 14, 7.875  # inches  (16:9, bigger canvas for sharpness)
 DPI = 120                       # sharper output
 
-# ── COLOUR PALETTE  (TradingView light theme) ────────────────────────────────
-BG       = '#FFFFFF'   # figure background
-PANEL    = '#FAFAFA'   # chart panel
-GRID_C   = '#E0E3EB'   # subtle grid lines
-UP_C     = '#26A69A'   # classic TV teal/green
-DN_C     = '#EF5350'   # classic TV coral/red
-VOL_UP   = '#26A69A'
-VOL_DN   = '#EF5350'
-VOL_C    = '#F7A9A8'   # uniform pinkish volume bar (matches screenshot)
-VOL_MA_C = '#4CAF50'   # green volume MA line
-MA20_C   = '#F57F17'   # dark amber
-MA50_C   = '#1565C0'   # deep blue
-MA200_C  = '#7B1FA2'   # purple
-SR_RES_C = '#EF5350'   # resistance red
-SR_SUP_C = '#26A69A'   # support teal
-PIVOT_C  = '#FB8C00'   # orange pivot
-TEXT_C   = '#131722'   # primary text (dark)
-MUTED_C  = '#787B86'   # secondary text (gray)
-LABEL_BG = '#FFFFFF'   # label background
+# ── COLOUR PALETTE  (Gandiva design system — see assets/gandiva.css) ─────────
+# Light theme. Values mirror the UI tokens exactly, so a chart sits on the
+# dashboard's paper ground as one continuous surface.
+BG       = '#FFFFFF'   # figure background — --g-raise-1
+PANEL    = '#FDFDFE'   # chart panel
+GRID_C   = '#E7EBEF'   # grid lines, barely there on purpose
+UP_C     = '#1E7A52'   # --g-up
+DN_C     = '#B4392E'   # --g-down
+VOL_UP   = '#7FB39B'   # volume reads quieter than price
+VOL_DN   = '#D3A09A'
+# Volume has to stay legible on paper: dry-up and surge are both primary
+# Minervini signals, so the bars carry real weight rather than a faint tint.
+VOL_C    = '#C3CDD6'   # neutral volume bar
+VOL_MA_C = '#71808E'   # volume MA — a reference line, not a signal
+# The three moving averages are one hue stepped across three values, so the
+# eye reads them as a family (fast/medium/slow) rather than three competing
+# signals. On paper the ramp runs light-to-dark the other way, so the slow
+# MA is the heaviest mark — the steps stay separable where they converge.
+MA20_C   = '#D9AE46'   # bright brass (fast)
+MA50_C   = '#9A7B28'   # true brass   (medium) — --g-brass
+MA200_C  = '#5E4B1B'   # deep brass   (slow)
+SR_RES_C = '#B4392E'   # resistance
+SR_SUP_C = '#1E7A52'   # support
+PIVOT_C  = '#8F6212'   # --g-warn
+TEXT_C   = '#12171D'   # --g-text
+MUTED_C  = '#6A7582'   # --g-text-3
+LABEL_BG = '#FFFFFF'   # --g-raise-2
 
 # ── PATTERN DETECTION ─────────────────────────────────────────────────────────
 
@@ -955,29 +963,226 @@ def detect_higher_low_pivot_any_ext(df):
     return True
 
 
+# ── LOCALLY-COMPUTED SCREENS ──────────────────────────────────────────────────
+# The chart viewer mirrors the scanner exactly (see mirrored_screen_keys below);
+# these two are the ONLY screens it computes itself, because the scanner has no
+# equivalent. Everything else must match the scanner stock-for-stock, so adding
+# a detector here would reintroduce the drift this design removes.
+#
+# The other detect_* functions remain defined above but are intentionally not
+# wired in — they are kept so a screen can be reinstated without rewriting it.
 EXTRA_SCREENS_DEF = {
-    # CCI screens — weekly variants get weekly charts
-    'cci_daily_cross':   {'label': 'CCI Daily Crossed 100',        'fn': lambda df, rs: detect_cci_daily_cross(df),   'weekly': False},
-    'cci_daily_above':   {'label': 'CCI Daily Above 100 (Rising)', 'fn': lambda df, rs: detect_cci_daily_above(df),   'weekly': False},
-    'cci_weekly_cross':  {'label': 'CCI Weekly Crossed 100',       'fn': lambda df, rs: detect_cci_weekly_cross(df),  'weekly': True},
-    'cci_weekly_above':  {'label': 'CCI Weekly Above 100 (Rising)','fn': lambda df, rs: detect_cci_weekly_above(df),  'weekly': True},
-    'cci_pullback':      {'label': 'CCI Pullback (50-100 Zone)',   'fn': lambda df, rs: detect_cci_pullback(df),      'weekly': False},
-    # Price pattern screens — weekly_pivot gets weekly chart
-    'ipo_base':          {'label': 'IPO Base Breakout',            'fn': lambda df, rs: detect_ipo_base(df),          'weekly': False},
-    'ath_breakout':      {'label': 'ATH After Consolidation',      'fn': lambda df, rs: detect_ath_consolidation(df), 'weekly': False},
-    'weekly_pivot':      {'label': 'Weekly Pivot Break',           'fn': lambda df, rs: detect_weekly_pivot_break(df),'weekly': True},
-    'pocket_pivot':      {'label': 'Pocket Pivot',                 'fn': lambda df, rs: detect_pocket_pivot(df),      'weekly': False},
-    'power_play':        {'label': 'Power Play (4%+ Surge)',       'fn': lambda df, rs: detect_power_play(df, rs),    'weekly': False},
-    'tight_squeeze':     {'label': 'Tight Consolidation Squeeze',  'fn': lambda df, rs: detect_tight_consolidation(df),'weekly': False},
-    'ma_coil':           {'label': 'MA Tightening (Coiling)',      'fn': lambda df, rs: detect_ma_tightening(df),     'weekly': False},
-    'accumulation':      {'label': 'High Volume Accumulation',     'fn': lambda df, rs: detect_high_vol_accumulation(df),'weekly': False},
-    'rs_leader_high':    {'label': 'RS Leader Near 52W High',      'fn': lambda df, rs: detect_rs_new_high(df, rs),   'weekly': False},
-    'momentum_bo':       {'label': 'Momentum Breakout (20D High)', 'fn': lambda df, rs: detect_momentum_breakout(df), 'weekly': False},
-    'first_pullback':    {'label': '1st Pullback to MA20',         'fn': lambda df, rs: detect_first_pullback(df),    'weekly': False},
-    'higher_low_pivot':  {'label': 'Higher Low Pivot',              'fn': lambda df, rs: detect_higher_low_pivot(df),         'weekly': False},
-    'hl_pivot_any_ext':  {'label': 'Higher Low Pivot (Any Ext)',   'fn': lambda df, rs: detect_higher_low_pivot_any_ext(df), 'weekly': False},
-    'ath_leaders':       {'label': 'All-Time High Leaders',        'fn': lambda df, rs: detect_ath_leaders(df),              'weekly': False},
+    'higher_low_pivot':  {'label': 'Higher Low Pivot',            'fn': lambda df, rs: detect_higher_low_pivot(df),         'weekly': False},
+    'hl_pivot_any_ext':  {'label': 'Higher Low Pivot (Any Ext)',  'fn': lambda df, rs: detect_higher_low_pivot_any_ext(df), 'weekly': False},
 }
+
+# Mirrored screens whose charts should be drawn on the weekly timeframe, since
+# the underlying scanner screen is a weekly signal.
+# ── SIDEBAR LAYOUT ────────────────────────────────────────────────────────────
+# Section headings and their screens, mirroring the scanner dashboard's own
+# sidebar so both views read the same way. Emitted into the data JSON under
+# "_sidebar"; the viewer renders from it and falls back to a flat list if it
+# is absent. Screens present in the data but missing from this layout are
+# appended under "Other" rather than being silently hidden.
+SIDEBAR_LAYOUT = [
+    ('Market Overview',          ['market_breadth', 'newly_added']),
+    ('Individual Criteria',      ['c1','c2','c3','c4','c5','c6','c7','c8']),
+    ('Composite Screens',        ['full_template','near_breakout','rs_leaders',
+                                  'vcp_setup','new_highs','ath_highs','ath_within_10']),
+    ('RS Line',                  ['rs_trending','rs_trending_minervini']),
+    ('Pivot Zones',              ['daily_near_pivot','weekly_near_pivot','near_base_pivot',
+                                  'ai_near_pivot','watch_list','c1_to_c6']),
+    ('Higher Low Pivot',         ['higher_low_pivot','hl_pivot_any_ext']),
+    ('Live Signals',             ['v4_live_signal','breakout_alert']),
+    ('Minervini Trades',         ['minervini_picks','minervini_backtest']),
+    ('Recent IPOs',              ['ipo_base','ipo_near_pivot','ipo_watch']),
+    ('CCI(34) Scanner',          ['cci34_best_setups','cci34_daily_cross_100',
+                                  'cci34_weekly_cross_100','cci34_daily_100',
+                                  'cci34_weekly_100','cci34_daily_neg100',
+                                  'cci34_weekly_neg100','strong_earnings']),
+    ('HTF & Trend Setups',       ['htf_setup','htf_potential','ma_pullback','hhhl_pullback',
+                                  'weekly_hl_pivot','high_ma20','high_ma50',
+                                  'primary_base_new','primary_base_10yr']),
+    ('Youth Screens',            ['young_3yr','young_10yr']),
+    ('F&O',                      ['fo_momentum','fo_strong_uptrend']),
+    ('Chartink Live (Full NSE)', ['ck_mtf_100','ck_daily_100','ck_weekly_100',
+                                  'ck_daily_cross','ck_weekly_cross']),
+]
+
+
+def build_sidebar(data):
+    """Sections in display order, keeping only screens this market actually has."""
+    used, out = set(), []
+    for title, keys in SIDEBAR_LAYOUT:
+        present = [k for k in keys if k in data]
+        if present:
+            out.append({'title': title, 'screens': present})
+            used.update(present)
+    leftover = [k for k in data if k not in used and not k.startswith('_')]
+    if leftover:
+        out.append({'title': 'Other', 'screens': sorted(leftover)})
+    return out
+
+
+WEEKLY_MIRROR_SCREENS = {
+    'cci34_weekly_100', 'cci34_weekly_cross_100', 'cci34_weekly_neg100',
+    'weekly_hl_pivot', 'ck_weekly_100', 'ck_weekly_cross',
+    'near_base_pivot', 'ai_near_pivot',
+}
+
+
+def mirrored_screen_keys(results_json):
+    """
+    Every screen the scanner produced, in its original order.
+
+    Read dynamically rather than hardcoded so the viewer tracks the scanner
+    automatically — a screen added to scanner.py appears here on the next run
+    with no change to this file.
+    """
+    try:
+        with open(results_json) as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"  ERROR reading {results_json}: {e}")
+        return []
+    return [k for k in data.get('screens', {}) if k not in EXTRA_SCREENS_DEF]
+
+
+# ── DERIVED SCREENS ───────────────────────────────────────────────────────────
+# A handful of dashboard screens are not stored in results.json — dashboard.html
+# builds them in the browser by filtering the union of every other screen. The
+# viewer has to reproduce them from the same source, or its sidebar would be
+# missing screens the scanner clearly shows.
+#
+# Each filter below is a direct port of the matching _build*Data() function in
+# dashboard.html. If one of those changes, change its twin here.
+#
+# Deliberately NOT ported: market_breadth (a chart, not a stock list) and
+# minervini_picks (LLM output, not a deterministic filter).
+
+def _union_of_screens(data):
+    """Every stock across every screen, de-duplicated by ticker, first wins."""
+    seen, out = set(), []
+    for scr in data.get('screens', {}).values():
+        for s in scr.get('stocks', []):
+            t = s.get('ticker')
+            if t and t not in seen:
+                seen.add(t)
+                out.append(s)
+    return out
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) else None
+
+
+def _ath_from_cache(ticker, cache_dir):
+    """
+    All-time high and latest close straight from the local price cache.
+
+    Needed because Chartink-sourced tickers arrive as symbol-only — the
+    scanner never prices them, so they carry no pct_from_ath and are
+    invisible to any ATH filter unless we compute it ourselves.
+    Returns (pct_from_ath, price) or (None, None).
+    """
+    path = os.path.join(cache_dir, ticker + '_NS.pkl')
+    if not os.path.exists(path):
+        return None, None
+    try:
+        import pickle
+        with open(path, 'rb') as f:
+            df = pickle.load(f)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        if df is None or len(df) < 20:
+            return None, None
+        ath   = float(df['High'].max())
+        price = float(df['Close'].iloc[-1])
+        if ath <= 0:
+            return None, None
+        return (price - ath) / ath * 100, price
+    except Exception:
+        return None, None
+
+
+def build_derived_screens(results_json, cache_dir=None):
+    """Return {key: {'label', 'stocks'}} for the browser-computed screens."""
+    try:
+        with open(results_json) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+
+    allst = _union_of_screens(data)
+    rs    = lambda s: s.get('rs_rank') or 0
+
+    # ath_highs — mirrors _buildAthData()
+    ath = [s for s in allst
+           if (_num(s.get('pct_from_ath')) is not None and s['pct_from_ath'] >= -5)
+           or (_num(s.get('pct_from_ath')) is None
+               and _num(s.get('pct_from_high')) is not None and s['pct_from_high'] >= -2)]
+    ath.sort(key=rs, reverse=True)
+
+    # rs_trending / rs_trending_minervini — mirrors _buildRsTrendingData()
+    rst = [s for s in allst if s.get('rs_trending_up') is True]
+    rst.sort(key=rs, reverse=True)
+    rst_min = [s for s in rst if (s.get('passed') or 0) >= 7]
+
+    # daily_near_pivot — mirrors _buildDailyPivotData()
+    dp = [s for s in allst
+          if _num(s.get('pct_from_pivot')) is not None
+          and -5 <= s['pct_from_pivot'] <= 5
+          and s.get('pivot_high') is not None]
+    dp.sort(key=lambda s: abs(s.get('pct_from_pivot') or 0))
+
+    # weekly_near_pivot — mirrors _buildWeeklyPivotData()
+    wp = [s for s in allst
+          if _num(s.get('pct_from_pivot_w')) is not None
+          and -5 <= s['pct_from_pivot_w'] <= 5
+          and s.get('pivot_high_w') is not None]
+    wp.sort(key=lambda s: abs(s.get('pct_from_pivot_w') or 0))
+
+    out = {
+        'ath_highs':             {'label': 'All-Time High Leaders',   'stocks': ath},
+        'rs_trending':           {'label': 'RS Line Trending Up',     'stocks': rst},
+        'rs_trending_minervini': {'label': 'RS Trend + Minervini',    'stocks': rst_min},
+        'daily_near_pivot':      {'label': 'Near Pivot (Daily ±5%)',  'stocks': dp},
+        'weekly_near_pivot':     {'label': 'Near Pivot (Weekly ±5%)', 'stocks': wp},
+    }
+
+    # ── Within 10% of All-Time High — full coverage ──────────────────────────
+    # Unlike ath_highs (which mirrors the dashboard and can only judge stocks
+    # the scanner priced), this one resolves an ATH for EVERY ticker in the
+    # scan — including the Chartink-sourced symbols that arrive with no
+    # metrics — by falling back to the local price cache. Without that
+    # fallback roughly a quarter of the universe is silently unjudgeable.
+    if cache_dir:
+        wide, resolved, unresolved = [], 0, 0
+        for s in allst:
+            v = _num(s.get('pct_from_ath'))
+            e = dict(s)
+            if v is None:
+                v, price = _ath_from_cache(s.get('ticker', ''), cache_dir)
+                if v is None:
+                    unresolved += 1
+                    continue
+                e['pct_from_ath'] = round(v, 1)
+                e['ath_source']   = 'cache'
+                if price is not None and not e.get('price'):
+                    e['price'] = round(price, 2)
+                resolved += 1
+            else:
+                e['ath_source'] = 'scanner'
+            if v >= -10:
+                wide.append(e)
+        # Closest to the high first — this screen is about proximity, and
+        # many of these stocks have no RS rank to sort on.
+        wide.sort(key=lambda s: -(s.get('pct_from_ath') or -999))
+        out['ath_within_10'] = {'label': 'Within 10% of All-Time High', 'stocks': wide}
+        print(f"  ATH 10% screen: {len(wide)} stocks "
+              f"({resolved} ATH recovered from cache, {unresolved} still unpriced)")
+
+    return {k: v for k, v in out.items() if v['stocks']}
 
 
 def build_extra_screens(results_json, cache_dir, out_dir, bars, is_us,
@@ -1339,19 +1544,21 @@ def generate_chart(ticker, entry, cache_dir, out_dir, is_us=False, bars=90, week
     ma_label2  = '10W'   if weekly else 'MA50'
     ma_label3  = '40W'   if weekly else 'MA200'
 
+    # Pattern labels use the UI's semantic palette, so a BREAKOUT badge on a
+    # card and the BREAKOUT label on its chart are the same green.
     _PAT_COLORS = {
-        'BREAKOUT':           '#26d47a',
-        'NEAR BREAKOUT':      '#26d47a',
-        'CUP & HANDLE':       '#f6a821',
-        'DOUBLE BOTTOM':      '#4da8ff',
-        'ASCENDING TRIANGLE': '#b588f9',
-        'BULL FLAG':          '#ff9d3a',
-        'TIGHT BASE':         '#f6a821',
-        'STAGE 2':            '#b588f9',
-        'VCP':                '#f6a821',
-        'WATCH':              '#5a7a90',
+        'BREAKOUT':           '#1E7A52',   # --g-up
+        'NEAR BREAKOUT':      '#1E7A52',
+        'CUP & HANDLE':       '#8F6212',   # --g-warn
+        'DOUBLE BOTTOM':      '#2C5E92',   # --g-info
+        'ASCENDING TRIANGLE': '#2C5E92',
+        'BULL FLAG':          '#8F6212',
+        'TIGHT BASE':         '#8F6212',
+        'STAGE 2':            '#2C5E92',
+        'WATCH':              '#6A7582',   # --g-text-3
+        'VCP':                '#8F6212',
     }
-    label_color = _PAT_COLORS.get(pat_name, '#5a7a90')
+    label_color = _PAT_COLORS.get(pat_name, '#6A7582')
 
     # ── FIGURE SETUP ──────────────────────────────────────────────────────────
     # layout: compact 12% header band + 88% chart area, right margin for Y labels
@@ -2100,6 +2307,10 @@ def export_excel(screens_data, out_path, market='India'):
     ]
 
     for key, scr in screens_data.items():
+        # Keys prefixed with "_" are metadata, not screens (e.g. _sidebar,
+        # which holds the sidebar layout as a list). Skip them.
+        if key.startswith('_') or not isinstance(scr, dict):
+            continue
         stocks = scr.get('stocks', [])
         if not stocks:
             continue
@@ -2170,7 +2381,9 @@ def export_excel(screens_data, out_path, market='India'):
         c.font  = Font(bold=True, color='8B949E', size=9, name='Consolas')
         c.fill  = hdr_fill
         c.border = bdr
-    for ri, (key, scr) in enumerate(screens_data.items(), 4):
+    _rows = [(k, v) for k, v in screens_data.items()
+             if not k.startswith('_') and isinstance(v, dict)]
+    for ri, (key, scr) in enumerate(_rows, 4):
         stks   = scr.get('stocks', [])
         n_buy  = sum(1 for s in stks if (s.get('ai') or {}).get('action')=='BUY')
         n_wtch = sum(1 for s in stks if (s.get('ai') or {}).get('action')=='WATCH')
@@ -2214,6 +2427,7 @@ def _regen_screen(stocks, cache_dir, out_dir, is_us, bars, manifest,
     today   = str(datetime.date.today())
     generated = []
     new_count = 0
+    no_chart  = 0
     for s in stocks:
         ticker = s.get('ticker', '')
         entry  = dict(s)
@@ -2223,14 +2437,19 @@ def _regen_screen(stocks, cache_dir, out_dir, is_us, bars, manifest,
                                  is_us=is_us, bars=bars, weekly=weekly)
             if out:
                 update_manifest(manifest, ticker, s, suffix)
-                generated.append(entry)
                 new_count += 1
                 print(f"  ↺ {ticker}{suffix}", end='  ', flush=True)
-            # else: no cache data, skip silently
-        else:
-            generated.append(entry)
-    if new_count:
-        print(f"\n  → {label}: {len(generated)} stocks ({new_count} regenerated)")
+            else:
+                # No cached price data — typically a Chartink-only ticker that
+                # is outside the local scan universe. The stock still belongs
+                # to this screen, so it is kept and the card falls back to the
+                # "No chart data" placeholder. Dropping it here is what used
+                # to make the viewer's counts disagree with the scanner's.
+                no_chart += 1
+        generated.append(entry)
+    if new_count or no_chart:
+        note = f" ({new_count} regenerated" + (f", {no_chart} without chart data" if no_chart else "") + ")"
+        print(f"\n  → {label}: {len(generated)} stocks{note}")
     return generated
 
 
@@ -2287,8 +2506,34 @@ Daily workflow (run every morning after scanner):
         else:
             print("⚠  Ollama not reachable. Start with: ollama serve")
 
-    INDIA_SCREENS = ['full_template','near_breakout','vcp_setup','high_ma20','rs_leaders','new_highs','cci34_best_setups']
-    US_SCREENS    = ['full_template','near_breakout','vcp_setup','high_ma20','rs_leaders','near_base_pivot']
+    # Mirror the scanner exactly: every screen it produced, in its own order.
+    # Only the two Higher Low Pivot screens are computed locally.
+    INDIA_SCREENS = mirrored_screen_keys(INDIA_JSON)
+    US_SCREENS    = mirrored_screen_keys(US_JSON)
+
+    # A ticker appears in many screens (RELIANCE might be in 20 of the 47), but
+    # its PNG is identical whichever screen asked for it. Render each
+    # ticker+timeframe once per run and reuse it — without this, mirroring all
+    # screens means ~10,000 redundant renders for India alone.
+    # Screens that carry their own meaningful order and must NOT be re-sorted
+    # by RS below. ath_within_10 is ranked by distance from the high, and many
+    # of its members are Chartink-sourced with no RS rank at all — sorting
+    # those by RS drops every one of them to the bottom, including stocks
+    # sitting exactly at their all-time high.
+    KEEP_ORDER = {'ath_within_10'}
+
+    rendered = set()
+
+    def render_once(ticker, s, cache_dir, out_dir, is_us, weekly):
+        """Draw a chart unless this ticker+timeframe was already drawn."""
+        kk = (ticker, weekly, is_us)
+        if kk in rendered:
+            return True
+        ok = generate_chart(ticker, s, cache_dir, out_dir,
+                            is_us=is_us, bars=args.bars, weekly=weekly)
+        if ok:
+            rendered.add(kk)
+        return ok
 
     # ── Load manifest + existing JSON ────────────────────────────────────────
     manifest = load_manifest() if args.daily else {}
@@ -2311,20 +2556,28 @@ Daily workflow (run every morning after scanner):
         print("\n=== INDIA CHARTS ===")
         os.makedirs(OUT_INDIA, exist_ok=True)
         india_screens = load_screen_stocks(INDIA_JSON, INDIA_SCREENS)
+        india_screens.update(build_derived_screens(INDIA_JSON, INDIA_CACHE))
         for key, scr in india_screens.items():
-            stocks = sorted(scr['stocks'], key=lambda s: -s.get('rs_rank', 0))[:args.max]
+            weekly = key in WEEKLY_MIRROR_SCREENS
+            stocks = (scr['stocks'] if key in KEEP_ORDER
+                      else sorted(scr['stocks'], key=lambda s: -(s.get('rs_rank') or 0)))[:args.max]
             if args.daily:
                 generated = _regen_screen(stocks, INDIA_CACHE, OUT_INDIA, False,
-                                          args.bars, manifest, label=scr['label'])
+                                          args.bars, manifest, weekly=weekly, label=scr['label'])
             else:
+                suffix = '_W' if weekly else ''
                 generated = []
+                drawn = 0
                 for s in stocks:
                     ticker = s.get('ticker', '')
-                    out = generate_chart(ticker, s, INDIA_CACHE, OUT_INDIA, is_us=False, bars=args.bars)
-                    if out:
-                        generated.append(s)
-                        print(f"  ✓ {ticker}", end='  ', flush=True)
-                print(f"\n  → {key}: {len(generated)} charts")
+                    entry  = dict(s)
+                    entry['img'] = ticker + suffix + '.png'
+                    if render_once(ticker, s, INDIA_CACHE, OUT_INDIA, False, weekly):
+                        drawn += 1
+                    # Kept whether or not a chart rendered — the screen must
+                    # match the scanner stock-for-stock.
+                    generated.append(entry)
+                print(f"  → {key}: {len(generated)} stocks ({drawn} with charts)", flush=True)
             # Preserve existing AI results for stocks already in JSON
             if args.daily and key in india_data:
                 old_ai = {e['ticker']: e.get('ai') for e in india_data[key].get('stocks', []) if e.get('ai')}
@@ -2338,20 +2591,26 @@ Daily workflow (run every morning after scanner):
         print("\n=== US CHARTS ===")
         os.makedirs(OUT_US, exist_ok=True)
         us_screens = load_screen_stocks(US_JSON, US_SCREENS)
+        us_screens.update(build_derived_screens(US_JSON, US_CACHE))
         for key, scr in us_screens.items():
-            stocks = sorted(scr['stocks'], key=lambda s: -s.get('rs_rank', 0))[:args.max]
+            weekly = key in WEEKLY_MIRROR_SCREENS
+            stocks = (scr['stocks'] if key in KEEP_ORDER
+                      else sorted(scr['stocks'], key=lambda s: -(s.get('rs_rank') or 0)))[:args.max]
             if args.daily:
                 generated = _regen_screen(stocks, US_CACHE, OUT_US, True,
-                                          args.bars, manifest, label=scr['label'])
+                                          args.bars, manifest, weekly=weekly, label=scr['label'])
             else:
+                suffix = '_W' if weekly else ''
                 generated = []
+                drawn = 0
                 for s in stocks:
                     ticker = s.get('ticker', '')
-                    out = generate_chart(ticker, s, US_CACHE, OUT_US, is_us=True, bars=args.bars)
-                    if out:
-                        generated.append(s)
-                        print(f"  ✓ {ticker}", end='  ', flush=True)
-                print(f"\n  → {key}: {len(generated)} charts")
+                    entry  = dict(s)
+                    entry['img'] = ticker + suffix + '.png'
+                    if render_once(ticker, s, US_CACHE, OUT_US, True, weekly):
+                        drawn += 1
+                    generated.append(entry)
+                print(f"  → {key}: {len(generated)} stocks ({drawn} with charts)", flush=True)
             if args.daily and key in us_data:
                 old_ai = {e['ticker']: e.get('ai') for e in us_data[key].get('stocks', []) if e.get('ai')}
                 for e in generated:
@@ -2378,23 +2637,12 @@ Daily workflow (run every morning after scanner):
         )
         us_data.update(extra_us)
 
-    # ── Near Weekly Pivot — dedicated server-side screen ─────────────────────
-    # Scans ALL stocks in results.json (full universe), not just those in
-    # pattern screens. Generates _W.png with pivot line for each qualifier.
-    if args.market in ('india', 'both'):
-        print("\n=== INDIA — Near Weekly Pivot Screen ===")
-        india_data['near_weekly_pivot'] = build_near_weekly_pivot(
-            INDIA_JSON, INDIA_CACHE, OUT_INDIA, args.bars, is_us=False,
-            manifest=manifest if args.daily else None,
-            existing_data=india_data if args.daily else None,
-        )
-    if args.market in ('us', 'both'):
-        print("\n=== US — Near Weekly Pivot Screen ===")
-        us_data['near_weekly_pivot'] = build_near_weekly_pivot(
-            US_JSON, US_CACHE, OUT_US, args.bars, is_us=True,
-            manifest=manifest if args.daily else None,
-            existing_data=us_data if args.daily else None,
-        )
+    # ── Near Weekly Pivot — retired ──────────────────────────────────────────
+    # This was a viewer-only screen with its own pivot window, which meant it
+    # disagreed with the dashboard's own weekly-pivot screen (187 vs 109 stocks
+    # for India). The mirrored 'weekly_near_pivot' — a direct port of
+    # dashboard.html's _buildWeeklyPivotData() — is now the single definition.
+    # build_near_weekly_pivot() is left in place should it ever be wanted back.
 
     # ── AI batch analysis on priority screens ─────────────────────────────────
     if args.ai_analysis and _AI_ENABLED and args.ai_top > 0:
@@ -2444,7 +2692,9 @@ Daily workflow (run every morning after scanner):
     def _build_ai_picks(data):
         picks = []
         seen  = set()
-        for scr in data.values():
+        for key, scr in data.items():
+            if key.startswith('_') or not isinstance(scr, dict):
+                continue
             for s in scr.get('stocks', []):
                 ai = s.get('ai') or {}
                 if ai.get('action') == 'BUY' and s.get('ticker') not in seen:
@@ -2456,7 +2706,10 @@ Daily workflow (run every morning after scanner):
     # ── Patch prices from live_prices files (scanner captures mid-session prices) ─
     def _patch_data_prices(data, live_prices_dict):
         """Replace scanner-embedded prices with end-of-session prices from live_prices.json."""
-        for scr in data.values():
+        for key, scr in data.items():
+            # "_"-prefixed keys hold metadata (e.g. _sidebar), not screens.
+            if key.startswith('_') or not isinstance(scr, dict):
+                continue
             for s in scr.get('stocks', []):
                 t = s.get('ticker', '')
                 lp = live_prices_dict.get(t)
@@ -2467,23 +2720,40 @@ Daily workflow (run every morning after scanner):
     _patch_data_prices(us_data,    _LIVE_US)
 
     # ── Write JSON + Excel — only for markets that were actually processed ──────
+    # 'ai_picks' is only meaningful when --ai-analysis ran; otherwise it is an
+    # empty screen the scanner has no counterpart for, so it is written only
+    # when it actually holds something.
     if args.market in ('india', 'both'):
-        india_data['ai_picks'] = _build_ai_picks(india_data)
+        _picks = _build_ai_picks(india_data)
+        if _picks.get('stocks'):
+            india_data['ai_picks'] = _picks
+        else:
+            india_data.pop('ai_picks', None)
+        india_data['_sidebar'] = build_sidebar(india_data)
         with open(os.path.join(SCRIPT_DIR, 'india_data.json'), 'w') as f:
             json.dump(india_data, f, default=str)
         export_excel(india_data, os.path.join(SCRIPT_DIR, 'india_screens.xlsx'), market='India')
 
     if args.market in ('us', 'both'):
-        us_data['ai_picks'] = _build_ai_picks(us_data)
+        _picks = _build_ai_picks(us_data)
+        if _picks.get('stocks'):
+            us_data['ai_picks'] = _picks
+        else:
+            us_data.pop('ai_picks', None)
+        us_data['_sidebar'] = build_sidebar(us_data)
         with open(os.path.join(SCRIPT_DIR, 'us_data.json'), 'w') as f:
             json.dump(us_data, f, default=str)
         export_excel(us_data, os.path.join(SCRIPT_DIR, 'us_screens.xlsx'), market='US')
 
     elapsed = (datetime.datetime.now() - t0).seconds
-    total   = sum(len(v['stocks']) for v in india_data.values()) + \
-              sum(len(v['stocks']) for v in us_data.values())
+    # "_"-prefixed keys are metadata (e.g. _sidebar), not screens.
+    def _screens_only(d):
+        return {k: v for k, v in d.items() if not k.startswith('_') and isinstance(v, dict)}
+    _ind, _us = _screens_only(india_data), _screens_only(us_data)
+    total = sum(len(v.get('stocks', [])) for v in _ind.values()) + \
+            sum(len(v.get('stocks', [])) for v in _us.values())
     print(f"\n✓ Done in {elapsed//60}m {elapsed%60}s — "
-          f"{total} stocks across {len(india_data)+len(us_data)} screens")
+          f"{total} stocks across {len(_ind)+len(_us)} screens")
     print(f"  Reload:  http://localhost:8765/chart_viewer.html")
     print(f"  Excel:   india_screens.xlsx  /  us_screens.xlsx")
 
