@@ -954,7 +954,7 @@ function getVirtualScreen(key){
 var BASE_SCREENS  = new Set(['full_template','near_breakout','vcp_setup','high_ma20','rs_leaders','new_highs','near_base_pivot']);
 // Screens whose charts are drawn on the weekly timeframe — must match
 // WEEKLY_MIRROR_SCREENS in generate_charts.py.
-var WEEKLY_SCREENS= new Set(['cci34_weekly_100','cci34_weekly_cross_100','cci34_weekly_neg100','weekly_hl_pivot','ck_weekly_100','ck_weekly_cross','near_base_pivot','ai_near_pivot']);
+var WEEKLY_SCREENS= new Set(['cci34_weekly_100','cci34_weekly_cross_100','cci34_weekly_neg100','weekly_hl_pivot','ck_weekly_100','ck_weekly_cross','near_base_pivot','ai_near_pivot','weekly_near_pivot']);
 var AI_SCREENS    = new Set(['ai_picks']);
 
 function buildSidebar(filterQ){
@@ -1077,7 +1077,7 @@ var PAT_CLS = {BREAKOUT:'pb-BREAKOUT',VCP:'pb-VCP','NEAR HIGH':'pb-NEARHIGH',
                'ON 20MA':'pb-ON20MA','STAGE 2':'pb-STAGE2',WATCH:'pb-WATCH'};
 
 // ── RENDER GRID ──────────────────────────────────────────────────────────────
-var WEEKLY_CHART_SCREENS = new Set(['cci34_weekly_100','cci34_weekly_cross_100','cci34_weekly_neg100','weekly_hl_pivot','ck_weekly_100','ck_weekly_cross','near_base_pivot','ai_near_pivot']);
+var WEEKLY_CHART_SCREENS = new Set(['cci34_weekly_100','cci34_weekly_cross_100','cci34_weekly_neg100','weekly_hl_pivot','ck_weekly_100','ck_weekly_cross','near_base_pivot','ai_near_pivot','weekly_near_pivot']);
 function renderGrid(stocks){
   var cur       = market==='india' ? '₹' : '$';
   var imgDir    = market==='india' ? 'charts_india' : 'charts_us';

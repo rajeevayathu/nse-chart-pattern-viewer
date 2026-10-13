@@ -1028,7 +1028,12 @@ WEEKLY_MIRROR_SCREENS = {
     'cci34_weekly_100', 'cci34_weekly_cross_100', 'cci34_weekly_neg100',
     'weekly_hl_pivot', 'ck_weekly_100', 'ck_weekly_cross',
     'near_base_pivot', 'ai_near_pivot',
+    # Derived screen: its signal is measured on the weekly pivot, so a daily
+    # chart shows the wrong timeframe for what put the stock on the list.
+    'weekly_near_pivot',
 }
+# Note: c6/c7/new_highs mention "52-week", but that is a lookback window on
+# daily bars, not a weekly timeframe — they stay daily.
 
 
 def mirrored_screen_keys(results_json):
