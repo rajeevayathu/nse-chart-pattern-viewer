@@ -11,7 +11,7 @@ Usage:
   python3.10 generate_charts.py --market us --screen near_breakout --max 60
 """
 
-import os, sys, json, pickle, argparse, datetime, warnings
+import os, re, sys, json, pickle, argparse, datetime, warnings
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -34,7 +34,8 @@ OUT_US       = os.path.join(SCRIPT_DIR, 'charts_us')
 HTML_OUT     = os.path.join(SCRIPT_DIR, 'chart_viewer.html')
 
 CHART_W, CHART_H = 14, 7.875  # inches  (16:9, bigger canvas for sharpness)
-DPI = 120                       # sharper output
+WEEKLY_BARS = 260                # 5 years of weekly bars — the long-term trend view
+DPI = 150                       # sharper output
 
 # ── COLOUR PALETTE  (Gandiva design system — see assets/gandiva.css) ─────────
 # Light theme. Values mirror the UI tokens exactly, so a chart sits on the
@@ -62,6 +63,7 @@ SR_SUP_C = '#1E7A52'   # support
 PIVOT_C  = '#8F6212'   # --g-warn
 TEXT_C   = '#12171D'   # --g-text
 MUTED_C  = '#6A7582'   # --g-text-3
+AVWAP_C  = ('#2C5E92', '#7A3FA0')   # anchored VWAP from HL1 (info blue) / HL2 (violet)
 LABEL_BG = '#FFFFFF'   # --g-raise-2
 
 # ── PATTERN DETECTION ─────────────────────────────────────────────────────────
@@ -993,6 +995,7 @@ SIDEBAR_LAYOUT = [
     ('Pivot Zones',              ['daily_near_pivot','weekly_near_pivot','near_base_pivot',
                                   'ai_near_pivot','watch_list','c1_to_c6']),
     ('Higher Low Pivot',         ['higher_low_pivot','hl_pivot_any_ext']),
+    ('Anchored VWAP',            ['avwap_hl_stage2','avwap_hl_near']),
     ('Live Signals',             ['v4_live_signal','breakout_alert']),
     ('Minervini Trades',         ['minervini_picks','minervini_backtest']),
     ('Recent IPOs',              ['ipo_base','ipo_near_pivot','ipo_watch']),
@@ -1285,6 +1288,301 @@ def build_extra_screens(results_json, cache_dir, out_dir, bars, is_us,
     return result
 
 
+# ── ANCHORED VWAP FROM WEEKLY HIGHER LOWS ─────────────────────────────────────
+# Weekly pivot low = unique lowest low of AVWAP_PIVOT_LR weeks either side —
+# the same 10/10 standard find_pivot_lows() uses for the chart's pivot marks.
+# (3/3 was tried first; it anchored on minor pullbacks, e.g. LLOYDSME Sep '26
+# at 1741 instead of the Feb '26 base low at 1042.9 that traders anchor on.)
+# HL1 = the latest pivot low, only if above the pivot before it; HL2 = the
+# pivot before that, only if it too is a higher low. AVWAP is anchored at
+# each, price = (O+H+L+C)/4.
+AVWAP_PIVOT_LR = 10
+AVWAP_NEAR_PCT = 3.0
+_ETF_RE = re.compile(r'BEES|ETF|LIQID|LIQUID|ADD$|^(NEXT50|MIDSMALL|BSLNIFTY|HDFCNIFTY|MON100|MAFANG|ALPHA|'
+                     r'MOM\d+|MOSMALL\d*|LOWVOL\d*|QUAL30|MIDCAP|SMALLCAP|BANKNIFTY|NIFTY\w*|SENSEX\w*|'
+                     r'GOLD\w*|SILVER\w*|LIQUID\w*|METAL|PSUBANK|ITBEES|PHARMABEES|AUTOBEES)$')
+
+
+AVWAP_LONG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cache_daily_long')
+AVWAP_LONG_MAX_AGE = 7 * 86400   # older bars never change; refresh weekly for new listings/splits
+
+
+def _long_daily_path(ticker, is_us):
+    return os.path.join(AVWAP_LONG_DIR, ('US_' if is_us else 'NS_') + ticker.replace('.', '_') + '.pkl')
+
+
+def ensure_long_daily(tickers, is_us=False, batch=100):
+    """
+    The scanner caches ~2 years of daily bars, which with 10/10 weekly pivots
+    rarely holds two higher lows. Keep 5 years of daily bars per ticker so
+    HL2 can be found and its AVWAP computed from daily bars. Batched yfinance
+    download, only for missing/stale files.
+    """
+    import time
+    import yfinance as yf
+    os.makedirs(AVWAP_LONG_DIR, exist_ok=True)
+    now   = time.time()
+    stale = [t for t in tickers
+             if not os.path.exists(_long_daily_path(t, is_us))
+             or now - os.path.getmtime(_long_daily_path(t, is_us)) > AVWAP_LONG_MAX_AGE]
+    if not stale:
+        return
+    print(f"  Long daily history: fetching {len(stale)} ticker(s)…", flush=True)
+    for i in range(0, len(stale), batch):
+        chunk = stale[i:i + batch]
+        syms  = {t: (t if is_us else t + '.NS') for t in chunk}
+        try:
+            raw = yf.download(list(syms.values()), period='6y', interval='1d', auto_adjust=False,
+                              group_by='ticker', progress=False, threads=False, timeout=30)
+        except Exception as e:
+            print(f"    batch {i // batch + 1} failed: {e}")
+            continue
+        for t, sym in syms.items():
+            try:
+                df = raw[sym][['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+            except Exception:
+                df = pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
+            # Written even when empty, so delisted symbols wait out the max age
+            # instead of being re-requested on every run.
+            df.to_pickle(_long_daily_path(t, is_us))
+        time.sleep(1)
+
+
+def avwap_daily_series(df_daily, ticker, is_us=False):
+    """
+    The scanner's daily bars, extended backwards with the long daily cache.
+    The splice is skipped if the two sources disagree by >3% on overlapping
+    days (e.g. a split adjusted in one source but not the other).
+    """
+    p = _long_daily_path(ticker, is_us)
+    if not os.path.exists(p):
+        return df_daily
+    try:
+        ld = pd.read_pickle(p)
+        if not len(ld):
+            return df_daily
+        ld.index = pd.to_datetime(ld.index)
+        if (ld.index.tz is None) != (df_daily.index.tz is None):
+            ld.index = (ld.index.tz_localize(df_daily.index.tz) if ld.index.tz is None
+                        else ld.index.tz_localize(None))
+        overlap = df_daily.index.intersection(ld.index)
+        if len(overlap) < 5:
+            return df_daily
+        chk = overlap[:20]
+        ratio = (df_daily.loc[chk, 'Close'] / ld.loc[chk, 'Close']).median()
+        if abs(ratio - 1) > 0.03:
+            return df_daily
+        older = ld[ld.index < df_daily.index[0]]
+        return pd.concat([older, df_daily]) if len(older) else df_daily
+    except Exception:
+        return df_daily
+
+
+def chart_daily_series(df_daily, ticker, is_us=False):
+    """
+    Daily bars for the 3-year chart view: the scanner cache extended backwards
+    with the 5-year cache. Unlike avwap_daily_series, a level difference
+    between the sources (US cache is dividend-adjusted, the long cache is not)
+    is reconciled by scaling the older bars to meet the scanner series.
+    """
+    p = _long_daily_path(ticker, is_us)
+    if not os.path.exists(p):
+        return df_daily
+    try:
+        ld = pd.read_pickle(p)
+        if not len(ld):
+            return df_daily
+        ld.index = pd.to_datetime(ld.index)
+        if (ld.index.tz is None) != (df_daily.index.tz is None):
+            ld.index = (ld.index.tz_localize(df_daily.index.tz) if ld.index.tz is None
+                        else ld.index.tz_localize(None))
+        overlap = df_daily.index.intersection(ld.index)
+        if len(overlap) < 5:
+            return df_daily
+        chk = overlap[:10]
+        ratio = float((df_daily.loc[chk, 'Close'] / ld.loc[chk, 'Close']).median())
+        if not np.isfinite(ratio) or ratio <= 0:
+            return df_daily
+        older = ld[ld.index < df_daily.index[0]].copy()
+        if not len(older):
+            return df_daily
+        if abs(ratio - 1) > 0.005:
+            for col in ('Open', 'High', 'Low', 'Close'):
+                if col in older:
+                    older[col] = older[col] * ratio
+        cols = [c for c in df_daily.columns if c in older.columns]
+        return pd.concat([older[cols], df_daily])
+    except Exception:
+        return df_daily
+
+
+def refresh_recent_bars(daily_by_t, is_us=False, batch=100):
+    """
+    The scanner cache's latest bar can be an intraday snapshot (e.g. SUNPHARMA
+    on 4 Nov: cached 1794.9 on 355k shares vs final 1773.4 on 4.9M), which
+    skews both the AVWAP and the distance to it. Re-download the last 5 daily
+    bars for the given tickers and overwrite those dates. Mutates daily_by_t.
+    """
+    import yfinance as yf
+    tickers = list(daily_by_t)
+    for i in range(0, len(tickers), batch):
+        chunk = tickers[i:i + batch]
+        syms  = {t: (t if is_us else t + '.NS') for t in chunk}
+        try:
+            raw = yf.download(list(syms.values()), period='5d', interval='1d', auto_adjust=False,
+                              group_by='ticker', progress=False, threads=False, timeout=30)
+        except Exception:
+            continue
+        for t, sym in syms.items():
+            try:
+                fr = raw[sym][['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+            except Exception:
+                continue
+            if not len(fr):
+                continue
+            dl = daily_by_t[t]
+            fr.index = pd.to_datetime(fr.index)
+            if (fr.index.tz is None) != (dl.index.tz is None):
+                fr.index = (fr.index.tz_localize(dl.index.tz) if fr.index.tz is None
+                            else fr.index.tz_localize(None))
+            daily_by_t[t] = pd.concat([dl[~dl.index.isin(fr.index)], fr]).sort_index()
+
+
+def avwap_line(df_daily, anchor):
+    """Daily anchored VWAP from `anchor` (a bar in df_daily) to the end, price = (O+H+L+C)/4."""
+    x  = df_daily[df_daily.index >= anchor]
+    tp = (x['Open'] + x['High'] + x['Low'] + x['Close']) / 4
+    v  = x['Volume'].astype(float)
+    return (tp * v).cumsum() / v.cumsum().replace(0, np.nan)
+
+
+def weekly_hl_avwap(df_daily):
+    """
+    Pivots are found on weekly bars; the AVWAP is computed on daily bars from
+    the day that made each pivot week's low — what an anchored-VWAP tool gives
+    when anchored on that day. (Weekly-bar AVWAP anchored at the whole week
+    averages in the days before the low; SHRIRAMFIN read 911.92 that way vs
+    ~921 from the low day.)
+
+    Returns {'avwap': [{n, date, low, value, dist}, ...], 'avwap_min_dist',
+    'avwap_near', 'avwap_rising', 'avwap_above_hl1'} or None if the stock has
+    no intact weekly higher-low structure.
+    """
+    w = resample_weekly(df_daily)
+    if len(w) < 30:
+        return None
+    lo  = w['Low'].values.astype(float)
+    lr  = AVWAP_PIVOT_LR
+    pls = [i for i in range(lr, len(lo) - lr)
+           if lo[i] == lo[i - lr:i + lr + 1].min()
+           and (lo[i - lr:i + lr + 1] == lo[i]).sum() == 1]
+    # The structure must be intact now: the latest pivot itself has to be a
+    # higher low. Older higher lows behind a newer lower low do not count
+    # (e.g. CARERATING Dec '25 1446.9 → Mar '26 1392.7 is a lower low).
+    if len(pls) < 2 or lo[pls[-1]] <= lo[pls[-2]]:
+        return None
+    hls = [pls[-1]]
+    if len(pls) >= 3 and lo[pls[-2]] > lo[pls[-3]]:
+        hls.insert(0, pls[-2])
+
+    close = float(df_daily['Close'].iloc[-1])
+    anchors = []
+    for n, p in enumerate(reversed(hls), start=1):
+        wk_end = w.index[p]
+        days   = df_daily[(df_daily.index > wk_end - pd.Timedelta(days=7)) & (df_daily.index <= wk_end)]
+        if not len(days):
+            continue
+        day  = days['Low'].idxmin()
+        line = avwap_line(df_daily, day)
+        val  = float(line.iloc[-1])
+        if not np.isfinite(val):
+            continue
+        anchors.append({'n': n, 'date': str(day.date()), 'low': round(float(days['Low'].min()), 2),
+                        'value': round(val, 2), 'dist': round((close / val - 1) * 100, 2)})
+    if not anchors:
+        return None
+    near = [a for a in anchors if abs(a['dist']) <= AVWAP_NEAR_PCT]
+    return {
+        'avwap':           anchors,
+        'avwap_min_dist':  min(abs(a['dist']) for a in anchors),
+        'avwap_near':      '+'.join(f"HL{a['n']}" for a in near),
+        'avwap_rising':    len(anchors) == 2 and anchors[0]['low'] > anchors[1]['low'],
+        'avwap_above_hl1': close > anchors[0]['low'],
+    }
+
+
+def build_avwap_screens(results_json, cache_dir, out_dir, is_us=False):
+    """
+    Two screens, both drawn as weekly charts with the AVWAP lines (_AV.png):
+      avwap_hl_near   — close within ±AVWAP_NEAR_PCT of either AVWAP
+      avwap_hl_stage2 — same, plus price > MA50 > MA200, rising higher lows,
+                        and price still above the latest higher low
+    Charts are always redrawn: the AVWAP moves every bar, so the price-move
+    manifest used by --daily would leave stale lines on unchanged stocks.
+    """
+    try:
+        with open(results_json) as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return {}
+    seen = {}
+    for scr in data.get('screens', {}).values():
+        for s in scr.get('stocks', []):
+            t = s.get('ticker', '')
+            if t and t not in seen and (is_us or not _ETF_RE.search(t)):
+                seen[t] = s
+
+    ensure_long_daily(list(seen), is_us)
+
+    # Pass 1 on cached bars with a wide band, so a stock whose stale last bar
+    # put it just outside ±AVWAP_NEAR_PCT is not lost before the refresh.
+    daily_by_t = {}
+    for t in seen:
+        df = load_df(t, cache_dir, is_us)
+        if df is None:
+            continue
+        try:
+            dl   = avwap_daily_series(df, t, is_us)
+            info = weekly_hl_avwap(dl)
+        except Exception:
+            info = None
+        if info and info['avwap_min_dist'] <= AVWAP_NEAR_PCT * 2.5:
+            daily_by_t[t] = dl
+
+    # Pass 2 on refreshed recent bars, with the real band.
+    refresh_recent_bars(daily_by_t, is_us)
+    near = []
+    for t, dl in daily_by_t.items():
+        try:
+            info = weekly_hl_avwap(dl)
+        except Exception:
+            info = None
+        if not info or not info['avwap_near']:
+            continue
+        c = dl['Close'].values.astype(float)
+        e = dict(seen[t])
+        e.update(info)
+        e['price'] = round(float(c[-1]), 2)
+        e['avwap_stage2'] = bool(len(c) >= 200 and c[-1] > c[-50:].mean() > c[-200:].mean())
+        e['img'] = t + '_AV.png'
+        near.append(e)
+
+    near.sort(key=lambda e: (-len(e['avwap_near']), e['avwap_min_dist']))
+    drawn = []
+    for e in near:
+        if generate_chart(e['ticker'], e, cache_dir, out_dir, is_us=is_us, avwap=True,
+                          avwap_daily=daily_by_t[e['ticker']]):
+            drawn.append(e)
+    stage2 = [e for e in drawn
+              if e['avwap_stage2'] and e['avwap_rising'] and e['avwap_above_hl1']]
+    print(f"  → avwap_hl_near: {len(drawn)} stocks · avwap_hl_stage2: {len(stage2)} stocks [weekly AVWAP]")
+    return {
+        'avwap_hl_stage2': {'label': f'AVWAP Weekly HL — Stage 2 (±{AVWAP_NEAR_PCT:g}%)', 'stocks': stage2},
+        'avwap_hl_near':   {'label': f'AVWAP Weekly HL — All Near (±{AVWAP_NEAR_PCT:g}%)', 'stocks': drawn},
+    }
+
+
 def build_near_weekly_pivot(results_json, cache_dir, out_dir, bars,
                              is_us=False, manifest=None, existing_data=None,
                              pct_lo=-8.0, pct_hi=5.0):
@@ -1452,390 +1750,289 @@ def resample_weekly(df):
     return weekly
 
 
-def generate_chart(ticker, entry, cache_dir, out_dir, is_us=False, bars=90, weekly=False):
+def generate_chart(ticker, entry, cache_dir, out_dir, is_us=False, bars=250, weekly=False,
+                   avwap=False, avwap_daily=None):
     """
     Generate annotated candlestick chart PNG.
     weekly=True → resample to weekly bars, use _W.png suffix.
+    avwap=True  → weekly chart with anchored VWAPs from the anchors stored in
+                  entry['avwap'] (see weekly_hl_avwap), saved as _AV.png so it
+                  does not overwrite the plain weekly chart other screens use.
+                  avwap_daily is the (longer) daily series the AVWAP is
+                  computed on; it also supplies the weekly bars drawn.
+    Weekly charts show WEEKLY_BARS (5 years) for the long-term trend view;
+    daily charts show `bars` (default 1 year).
     Returns output path or None if failed.
     """
     df_daily = load_df(ticker, cache_dir, is_us)
     if df_daily is None:
         return None
 
+    if avwap:
+        weekly = True
+        if avwap_daily is not None:
+            df_daily = avwap_daily
+    if weekly and not avwap:
+        # scanner cache holds ~2 years; splice in the long cache for the 5-year view
+        df_daily = chart_daily_series(df_daily, ticker, is_us)
     if weekly:
         df = resample_weekly(df_daily)
-        suffix = '_W'
-        bars_w = 78   # ~18 months of weekly bars
+        suffix = '_AV' if avwap else '_W'
+        bars_w = WEEKLY_BARS
         df = df.tail(bars_w).copy()
     else:
         df = df_daily
         suffix = ''
         df = df.tail(bars).copy()
+    return _render_clean(ticker, entry, df, df_daily, out_dir, suffix,
+                         is_us=is_us, weekly=weekly, avwap=avwap)
+
+
+# ── CLEAN CHART RENDERER ──────────────────────────────────────────────────────
+# TradingView-style: candles, MAs, 10/10 pivot labels, the screen's pivot line,
+# AVWAP (AVWAP screens only) and volume. No patterns, boxes or trend lines.
+CC_UP      = '#089981'
+CC_DN      = '#F23645'
+CC_GRID    = '#F0F3FA'
+CC_AXIS    = '#B2B5BE'
+CC_TEXT    = '#131722'
+CC_MUTED   = '#787B86'
+CC_MA_S    = '#2962FF'   # daily EMA21
+CC_MA_M    = '#FF9800'   # SMA50 / 10W
+CC_MA_L    = '#7E57C2'   # SMA200 / 40W
+CC_AVWAP   = ('#1565C0', '#C2185B')
+CC_PIVOT   = '#5D606B'
+
+
+def _nice_log_ticks(lo, hi, n=9):
+    """Round-number ticks (1, 1.5, 2, 3, 4, 5, 6, 8 × 10^k) roughly evenly spaced on a log axis."""
+    if lo <= 0 or hi <= lo:
+        return None
+    cands = sorted(m * 10 ** k for k in range(int(np.floor(np.log10(lo))) - 1,
+                                              int(np.ceil(np.log10(hi))) + 1)
+                   for m in (1, 1.5, 2, 3, 4, 5, 6, 8))
+    cands = [c for c in cands if lo <= c <= hi]
+    if len(cands) <= n:
+        return cands
+    min_ratio = (hi / lo) ** (1.0 / (n + 1))
+    out = [cands[0]]
+    for c in cands[1:]:
+        if c / out[-1] >= min_ratio:
+            out.append(c)
+    return out
+
+
+def _fmt_px(v):
+    return f'{v:,.0f}' if v >= 10000 else f'{v:,.2f}'
+
+
+def _render_clean(ticker, entry, df, df_daily, out_dir, suffix,
+                  is_us=False, weekly=False, avwap=False):
     n   = len(df)
+    if n < 5:
+        return None
     xs  = np.arange(n)
     op  = df['Open'].values.astype(float)
     hi  = df['High'].values.astype(float)
     lo  = df['Low'].values.astype(float)
     cl  = df['Close'].values.astype(float)
-    vol = df['Volume'].values.astype(float)
+    vol = np.nan_to_num(df['Volume'].values.astype(float))
 
-    # MAs — computed on full history first, then slice to display window
-    # Daily:  EMA21 (short), SMA50 (medium), SMA200 (long)  — Minervini daily methodology
-    # Weekly: EMA5 (short), SMA10 (10-week ≈ SMA50 daily), SMA40 (40-week ≈ SMA200 daily) — Minervini weekly methodology
+    # MAs on the full history, then sliced to the window so the left edge is right
     full_src = resample_weekly(df_daily) if weekly else df_daily
-    full_c = pd.Series(full_src['Close'].values.astype(float))
+    full_c   = pd.Series(full_src['Close'].values.astype(float))
     if weekly:
-        ma20_full  = full_c.ewm(span=5, adjust=False).mean().values   # EMA5 weekly short-term
-        ma50_full  = full_c.rolling(10).mean().values                  # 10-week SMA (Minervini key level)
-        ma200_full = full_c.rolling(40).mean().values                  # 40-week SMA (Minervini key level)
+        mas = [('SMA 10W', full_c.rolling(10).mean().values, CC_MA_M, 1.5),
+               ('SMA 40W', full_c.rolling(40).mean().values, CC_MA_L, 1.8)]
     else:
-        ma20_full  = full_c.ewm(span=21, adjust=False).mean().values   # EMA21 daily
-        ma50_full  = full_c.rolling(50).mean().values                  # SMA50
-        ma200_full = full_c.rolling(200).mean().values                 # SMA200
-    ma20  = ma20_full[-n:]
-    ma50  = ma50_full[-n:]
-    ma200 = ma200_full[-n:]
+        mas = [('EMA 21',  full_c.ewm(span=21, adjust=False).mean().values, CC_MA_S, 1.1),
+               ('SMA 50',  full_c.rolling(50).mean().values,  CC_MA_M, 1.5),
+               ('SMA 200', full_c.rolling(200).mean().values, CC_MA_L, 1.8)]
+    mas = [(lbl, v[-n:], col, lw) for lbl, v, col, lw in mas]
+    offset_full = len(full_src) - n
 
-    # Pattern detection on full timeframe data
+    fig = plt.figure(figsize=(CHART_W, CHART_H), facecolor='#FFFFFF')
+    gs  = fig.add_gridspec(2, 1, height_ratios=[5, 1], left=0.008, right=0.93,
+                           top=0.885, bottom=0.06, hspace=0.0)
+    ax  = fig.add_subplot(gs[0])
+    axv = fig.add_subplot(gs[1], sharex=ax)
+
+    # price scale: log when the window spans a large move (keeps 5Y trends readable)
+    y_lo, y_hi = float(np.nanmin(lo)), float(np.nanmax(hi))
+    use_log = weekly and y_lo > 0 and y_hi / y_lo > 2.5
+    if use_log:
+        ax.set_yscale('log')
+        pad = (y_hi / y_lo) ** 0.07
+        ax.set_ylim(y_lo / pad, y_hi * pad)
+    else:
+        pad = (y_hi - y_lo) * 0.08
+        ax.set_ylim(y_lo - pad, y_hi + pad)
+
+    # ── candles ──
+    up = cl >= op
+    wick_w = 0.9 if n > 180 else 1.0
+    body_w = 0.62 if n > 180 else 0.68
+    for mask, col in ((up, CC_UP), (~up, CC_DN)):
+        ax.vlines(xs[mask], lo[mask], hi[mask], color=col, linewidth=wick_w, zorder=3)
+        b0 = np.minimum(op, cl)[mask]
+        bh = np.abs(cl - op)[mask]
+        bh = np.maximum(bh, (hi - lo)[mask] * 0.004 + 1e-9)
+        ax.bar(xs[mask], bh, bottom=b0, width=body_w, color=col, edgecolor=col,
+               linewidth=0.3, zorder=4)
+
+    # ── moving averages ──
+    for lbl, v, col, lw in mas:
+        ok = np.isfinite(v)
+        if ok.any():
+            ax.plot(xs[ok], v[ok], color=col, linewidth=lw, zorder=5, alpha=0.95)
+
+    # ── anchored VWAPs (AVWAP screens only) ──
+    av_legend = []
+    if avwap:
+        for a in (entry.get('avwap') or []):
+            day = pd.Timestamp(a['date'])
+            if df_daily.index.tz is not None:
+                day = day.tz_localize(df_daily.index.tz)
+            ai = full_src.index.searchsorted(day)
+            if ai >= len(full_src):
+                continue
+            line_d = avwap_line(df_daily, day)
+            line   = line_d.groupby(full_src.index[full_src.index.searchsorted(line_d.index)]).last()
+            line   = line.reindex(full_src.index[ai:]).values.astype(float)
+            start  = ai - offset_full
+            seg_x  = np.arange(start, start + len(line))
+            keep   = (seg_x >= 0) & np.isfinite(line)
+            col    = CC_AVWAP[a['n'] - 1]
+            ax.plot(seg_x[keep], line[keep], color=col, linewidth=1.9, zorder=6)
+            if 0 <= start < n:
+                ax.annotate(f"AV{a['n']}", xy=(start, lo[start]), xytext=(0, -20),
+                            textcoords='offset points', ha='center', va='top',
+                            fontsize=8, fontweight='bold', color=col, zorder=8,
+                            arrowprops=dict(arrowstyle='-', color=col, lw=0.8))
+            av_legend.append((f"AVWAP{a['n']} {_fmt_px(a['value'])} ({a['dist']:+.1f}%)", col))
+
+    # ── 10/10 pivot labels (price only, like TradingView Pivot Points High Low) ──
     full_hi = full_src['High'].values.astype(float)
     full_lo = full_src['Low'].values.astype(float)
-    full_cl = full_src['Close'].values.astype(float)
-    disp_bars = len(df)
+    ph = find_pivot_highs(full_hi, left=10, right=10, lookback=n + 20)
+    pl = find_pivot_lows(full_lo,  left=10, right=10, lookback=n + 20)
+    for i, v in ph:
+        x = i - offset_full
+        if 2 <= x < n:
+            ax.annotate(_fmt_px(v), xy=(x, v), xytext=(0, 5), textcoords='offset points',
+                        ha='center', va='bottom', fontsize=8.5, color=CC_TEXT, zorder=7)
+    for i, v in pl:
+        x = i - offset_full
+        if 2 <= x < n:
+            ax.annotate(_fmt_px(v), xy=(x, v), xytext=(0, -5), textcoords='offset points',
+                        ha='center', va='top', fontsize=8.5, color=CC_TEXT, zorder=7)
 
-    ph_full = find_pivot_highs(full_hi, left=10, right=10, lookback=disp_bars + 20)
-    pl_full = find_pivot_lows(full_lo,  left=10, right=10, lookback=disp_bars + 20)
+    # ── the screen's pivot (buy point): dashed from the pivot bar to the right edge ──
+    piv     = entry.get('pivot_high_w' if weekly else 'pivot_high')
+    piv_ago = entry.get('pivot_bars_ago_w' if weekly else 'pivot_bars_ago')
+    tags = []
+    if piv and piv > 0:
+        px0 = max(0, n - 1 - int(piv_ago)) if piv_ago is not None else 0
+        ax.hlines(piv, px0, n + 3, color=CC_PIVOT, linewidth=1.0,
+                  linestyle=(0, (5, 4)), zorder=5)
+        tags.append((piv, f'Pivot {_fmt_px(piv)}', CC_PIVOT))
 
-    offset_full = len(full_hi) - n
-    def to_disp(idx): return idx - offset_full
+    # ── last price line + tag ──
+    last = float(cl[-1])
+    lcol = CC_UP if n < 2 or cl[-1] >= cl[-2] else CC_DN
+    ax.hlines(last, 0, n + 3, color=lcol, linewidth=0.8, linestyle=(0, (1, 3)), zorder=5)
+    tags.append((last, _fmt_px(last), lcol))
+    for yv, txt, col in tags:
+        ax.annotate(txt, xy=(1.0, yv), xycoords=('axes fraction', 'data'),
+                    xytext=(4, 0), textcoords='offset points', ha='left', va='center',
+                    fontsize=8.5, fontweight='bold', color='#FFFFFF', zorder=9,
+                    annotation_clip=False,
+                    bbox=dict(boxstyle='square,pad=0.28', fc=col, ec=col))
 
-    ph_disp = [(to_disp(i), v) for i, v in ph_full if 0 <= to_disp(i) < n]
-    pl_disp = [(to_disp(i), v) for i, v in pl_full if 0 <= to_disp(i) < n]
+    # ── volume ──
+    vcol = np.where(up, CC_UP, CC_DN)
+    axv.bar(xs, vol, width=body_w, color=vcol, alpha=0.45, linewidth=0, zorder=2)
+    vma = pd.Series(vol).rolling(20 if not weekly else 10).mean().values
+    axv.plot(xs, vma, color=CC_MUTED, linewidth=1.0, zorder=3)
+    # cap the scale so one huge spike doesn't flatten every other bar
+    pos = vol[vol > 0]
+    vmax = float(np.nanmax(vol)) if len(pos) else 1.0
+    if len(pos) > 20:
+        vmax = min(vmax, float(np.percentile(pos, 95)) * 2.5)
+    axv.set_ylim(0, vmax * 1.1)
+    axv.set_yticks([])
 
-    vcps = detect_vcp_contractions(full_cl, full_hi, full_lo, lookback=disp_bars+20)
-    vcps_disp = [(to_disp(s), to_disp(e), hv, lv, rng)
-                 for s, e, hv, lv, rng in vcps
-                 if 0 <= to_disp(s) < n]
-
-    # Horizontal S/R clusters (replace slanted trendlines)
-    sr_levels = cluster_sr_levels(hi, lo, lookback=min(n, 120))
-
-    # Base / consolidation box
-    base_box = detect_base_box(cl, hi, lo, lookback=min(n, 50))
-
-    # Breakout level — use weekly pivot when in weekly mode
-    if weekly:
-        pivot_high    = entry.get('pivot_high_w')
-        pivot_crossed = entry.get('pivot_crossed_w', False)
-        pivot_bars_ago_key = 'pivot_bars_ago_w'
+    # ── axes ──
+    ax.set_xlim(-1, n + 3)
+    for a_ in (ax, axv):
+        a_.set_facecolor('#FFFFFF')
+        a_.grid(True, color=CC_GRID, linewidth=0.8, zorder=0)
+        a_.set_axisbelow(True)
+        for sp in ('top', 'left'):
+            a_.spines[sp].set_visible(False)
+        for sp in ('right', 'bottom'):
+            a_.spines[sp].set_color(CC_AXIS)
+            a_.spines[sp].set_linewidth(0.6)
+        a_.tick_params(left=False, labelleft=False, right=True, labelright=True,
+                       colors=CC_MUTED, labelsize=8.5, length=3, width=0.5)
+    ax.tick_params(bottom=False, labelbottom=False)
+    if use_log:
+        tk = _nice_log_ticks(*ax.get_ylim())
+        if tk:
+            ax.yaxis.set_major_locator(mticker.FixedLocator(tk))
+        ax.yaxis.set_minor_locator(mticker.NullLocator())
+        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     else:
-        pivot_high    = entry.get('pivot_high')
-        pivot_crossed = entry.get('pivot_crossed', False)
-        pivot_bars_ago_key = 'pivot_bars_ago'
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(7))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt_px(v)))
 
-    # Pattern identification
-    pct_hi   = entry.get('pct_from_high', -99)
-    pct_m20  = entry.get('pct_from_ma20')
-    passed   = entry.get('passed', 0)
-    pat_name, pat_conf, pat_note = identify_chart_pattern(cl, hi, lo, vol, ma20, ma50)
-    pattern_label = pat_name
-
-    # ── META STRINGS (computed before figure) ────────────────────────────────
-    price_str  = f"{'$' if is_us else '₹'}{cl[-1]:,.2f}"
-    pct_h_str  = f"{pct_hi:+.1f}%" if pct_hi is not None else ''
-    rs_str     = f"RS {entry.get('rs_rank', '?')}"
-    passed_str = f"{passed}/8"
-    tf_str     = 'W' if weekly else 'D'
-    ma_label1  = 'EMA5'  if weekly else 'EMA21'
-    ma_label2  = '10W'   if weekly else 'MA50'
-    ma_label3  = '40W'   if weekly else 'MA200'
-
-    # Pattern labels use the UI's semantic palette, so a BREAKOUT badge on a
-    # card and the BREAKOUT label on its chart are the same green.
-    _PAT_COLORS = {
-        'BREAKOUT':           '#1E7A52',   # --g-up
-        'NEAR BREAKOUT':      '#1E7A52',
-        'CUP & HANDLE':       '#8F6212',   # --g-warn
-        'DOUBLE BOTTOM':      '#2C5E92',   # --g-info
-        'ASCENDING TRIANGLE': '#2C5E92',
-        'BULL FLAG':          '#8F6212',
-        'TIGHT BASE':         '#8F6212',
-        'STAGE 2':            '#2C5E92',
-        'WATCH':              '#6A7582',   # --g-text-3
-        'VCP':                '#8F6212',
-    }
-    label_color = _PAT_COLORS.get(pat_name, '#6A7582')
-
-    # ── FIGURE SETUP ──────────────────────────────────────────────────────────
-    # layout: compact 12% header band + 88% chart area, right margin for Y labels
-    fig = plt.figure(figsize=(CHART_W, CHART_H), facecolor=BG)
-    gs  = fig.add_gridspec(
-        2, 1, height_ratios=[4, 1],
-        left=0.01, right=0.88, top=0.88, bottom=0.075, hspace=0.04
-    )
-    ax_price = fig.add_subplot(gs[0])
-    ax_vol   = fig.add_subplot(gs[1], sharex=ax_price)
-    ax_price.set_facecolor(PANEL)
-    ax_vol.set_facecolor(PANEL)
-
-    # ── CANDLESTICKS ──────────────────────────────────────────────────────────
-    W = 0.65
-    for i in range(n):
-        is_up  = cl[i] >= op[i]
-        color  = UP_C if is_up else DN_C
-        body_l = min(op[i], cl[i])
-        body_h = max(op[i], cl[i])
-        min_body = (hi[i] - lo[i]) * 0.003
-        if body_h - body_l < min_body:
-            body_h = body_l + min_body
-        # Wick — thin, same color as body
-        ax_price.plot([i, i], [lo[i], hi[i]], color=color, linewidth=0.7, zorder=2)
-        # Body — filled with slight border
-        ax_price.add_patch(plt.Rectangle(
-            (i - W/2, body_l), W, body_h - body_l,
-            facecolor=color, edgecolor=color, linewidth=0.3, alpha=0.9, zorder=3
-        ))
-
-    # ── VOLUME ────────────────────────────────────────────────────────────────
-    vol_ma = pd.Series(vol).rolling(20).mean().values
-    for i in range(n):
-        ax_vol.add_patch(plt.Rectangle(
-            (i - W/2, 0), W, vol[i],
-            facecolor=VOL_C, edgecolor='none', alpha=0.75, zorder=2
-        ))
-    ax_vol.plot(xs, vol_ma, color=VOL_MA_C, linewidth=1.2, zorder=3)
-    ax_vol.set_ylim(0, float(np.nanmax(vol)) * 1.4)
-
-    # ── MOVING AVERAGES ───────────────────────────────────────────────────────
-    valid20  = ~np.isnan(ma20)
-    valid50  = ~np.isnan(ma50)
-    valid200 = ~np.isnan(ma200)
-    if valid20.any():
-        ax_price.plot(xs[valid20],  ma20[valid20],  color=MA20_C, linewidth=1.6, zorder=4, alpha=0.95)
-    if valid50.any():
-        ax_price.plot(xs[valid50],  ma50[valid50],  color=MA50_C, linewidth=1.6, zorder=4, alpha=0.95)
-    if valid200.any():
-        ax_price.plot(xs[valid200], ma200[valid200], color=MA200_C, linewidth=1.1, zorder=4,
-                      alpha=0.85, linestyle=(0, (5, 3)))
-
-    # ── HORIZONTAL S/R LEVELS ────────────────────────────────────────────────
-    price_now = float(cl[-1])
-    price_range = float(np.max(hi)) - float(np.min(lo))
-    min_gap = price_range * 0.035
-    labeled_levels = []
-    for lvl, touches in sr_levels[:6]:
-        if any(abs(lvl - l) < min_gap for l in labeled_levels):
+    # date ticks: weekly → Jan / Jul of each year; daily → each month (year on Jan)
+    idx = df.index
+    ticks, labels, prev = [], [], None
+    for i, d in enumerate(idx):
+        key = (d.year, d.month)
+        if key == prev:
             continue
-        if abs(lvl - price_now) < price_range * 0.025:
-            continue
-        labeled_levels.append(lvl)
-        above = lvl > price_now
-        lc    = SR_RES_C if above else SR_SUP_C
-        lw    = 0.6 + min(touches * 0.10, 0.5)
-        ax_price.hlines(lvl, 0, n - 1, color=lc, linewidth=lw,
-                        linestyle=(0, (5, 5)), alpha=0.55, zorder=4)
-        # Inline floating label ON the chart (TradingView style)
-        label_x = max(2, n - int(n * 0.22))
-        fmt = f'{lvl:,.0f}' if lvl >= 100 else f'{lvl:.2f}'
-        ax_price.text(
-            label_x, lvl, fmt,
-            ha='left', va='center', fontsize=7.5, zorder=7,
-            color=lc, fontfamily='monospace',
-            bbox=dict(boxstyle='round,pad=0.18', fc=LABEL_BG, ec=lc, lw=0.6, alpha=0.88)
-        )
+        prev = key
+        if weekly and d.month in (1, 7):
+            ticks.append(i); labels.append(str(d.year) if d.month == 1 else 'Jul')
+        elif not weekly:
+            ticks.append(i); labels.append(str(d.year) if d.month == 1 else d.strftime('%b'))
+    ticks_ok = [(t, l) for t, l in zip(ticks, labels) if t > 2]
+    if ticks_ok:
+        axv.set_xticks([t for t, _ in ticks_ok])
+        axv.set_xticklabels([l for _, l in ticks_ok], color=CC_MUTED, fontsize=8.5)
+    axv.tick_params(axis='x', length=3, colors=CC_MUTED)
 
-    # ── BASE / CONSOLIDATION BOX ─────────────────────────────────────────────
-    if base_box is not None:
-        bh, bl, bstart = base_box
-        bx0, bx1 = max(0, bstart), n - 1
-        brng = (bh - bl) / bl * 100 if bl > 0 else 0
-        ax_price.add_patch(mpatches.FancyBboxPatch(
-            (bx0, bl), bx1 - bx0, bh - bl,
-            boxstyle='square,pad=0', linewidth=1.0,
-            edgecolor=MA50_C + '88', facecolor=MA50_C + '12', zorder=3
-        ))
-        ax_price.text(bx0 + 0.5, bh * 1.001, f' Base {brng:.0f}%',
-                      color=MA50_C, fontsize=7, va='bottom', ha='left', zorder=5)
+    # ── header (TradingView-style legend) ──
+    exch = 'US' if is_us else 'NSE'
+    tf   = '1W' if weekly else '1D'
+    span = f"{round(n / 52)}Y" if weekly else f"{round(n / 21)}M" if n < 240 else '1Y'
+    fig.text(0.010, 0.975, ticker, fontsize=15, fontweight='bold', color=CC_TEXT, va='top')
+    fig.text(0.010 + 0.0118 * len(ticker) + 0.008, 0.968, f'·  {tf}  ·  {exch}  ·  {span}',
+             fontsize=10, color=CC_MUTED, va='top')
+    chg = (cl[-1] / cl[-2] - 1) * 100 if n > 1 and cl[-2] else 0.0
+    ohlc = (f"O {_fmt_px(op[-1])}   H {_fmt_px(hi[-1])}   L {_fmt_px(lo[-1])}   "
+            f"C {_fmt_px(cl[-1])}   {cl[-1] - cl[-2]:+,.2f} ({chg:+.2f}%)") if n > 1 else ''
+    fig.text(0.40, 0.968, ohlc, fontsize=9.5, color=lcol, va='top', fontfamily='monospace')
+    rs = entry.get('rs_rank')
+    meta = '   '.join(x for x in [f'RS {rs}' if rs is not None else '',
+                                   f"{entry['passed']}/8" if entry.get('passed') is not None else '']
+                      if x)
+    if meta:
+        fig.text(0.93, 0.968, meta, fontsize=9.5, color=CC_MUTED, va='top', ha='right')
+    lx = 0.010
+    for lbl, v, col, lw in mas:
+        cur_v = v[-1] if np.isfinite(v[-1]) else None
+        txt = f"{lbl} {_fmt_px(cur_v)}" if cur_v else lbl
+        fig.text(lx, 0.928, txt, fontsize=9, color=col, va='top', fontweight='bold')
+        lx += 0.0068 * len(txt) + 0.018
+    for txt, col in av_legend:
+        fig.text(lx, 0.928, txt, fontsize=9, color=col, va='top', fontweight='bold')
+        lx += 0.0068 * len(txt) + 0.018
 
-    # ── PIVOT DOTS + INLINE PRICE LABELS (like screenshot) ───────────────────
-    ph_price_range = float(np.max(hi)) - float(np.min(lo))
-    ph_min_gap = ph_price_range * 0.04
-    ph_labeled = []
-    for px, pv in sorted(ph_disp, key=lambda x: -x[1])[:6]:
-        if any(abs(pv - v) < ph_min_gap for v in ph_labeled):
-            continue
-        ph_labeled.append(pv)
-        ax_price.scatter([px], [pv], color=DN_C, s=18, zorder=5, marker='v', linewidths=0)
-        fmt = f'{pv:,.2f}' if pv < 100 else f'{pv:,.2f}'
-        ax_price.text(px, pv * 1.013, fmt,
-                      ha='center', va='bottom', fontsize=7, color=MUTED_C,
-                      fontfamily='monospace', zorder=6)
-
-    pl_labeled = []
-    for px, pv in sorted(pl_disp, key=lambda x: x[1])[:6]:
-        if any(abs(pv - v) < ph_min_gap for v in pl_labeled):
-            continue
-        pl_labeled.append(pv)
-        ax_price.scatter([px], [pv], color=UP_C, s=18, zorder=5, marker='^', linewidths=0)
-        fmt = f'{pv:,.2f}' if pv < 100 else f'{pv:,.2f}'
-        ax_price.text(px, pv * 0.987, fmt,
-                      ha='center', va='top', fontsize=7, color=MUTED_C,
-                      fontfamily='monospace', zorder=6)
-
-    # ── VCP CONTRACTION BRACKETS ──────────────────────────────────────────────
-    for s_i, e_i, hv, lv, rng in vcps_disp[-3:]:
-        mid_x = (s_i + e_i) / 2
-        mid_y = (hv + lv) / 2
-        ax_price.annotate('', xy=(e_i, lv), xytext=(s_i, hv),
-                          arrowprops=dict(arrowstyle='<->', color=MA20_C, lw=1.0))
-        ax_price.text(mid_x, mid_y, f'{rng:.0f}%', color=MA20_C,
-                      fontsize=7, ha='center', va='center', zorder=6,
-                      bbox=dict(boxstyle='round,pad=0.2', fc=LABEL_BG, ec=MA20_C + '80', lw=0.6))
-
-    # ── BREAKOUT / PIVOT HIGH LEVEL ───────────────────────────────────────────
-    if pivot_high and pivot_high > 0:
-        piv_ago = entry.get(pivot_bars_ago_key) or 0
-        piv_x   = max(0, n - 1 - int(piv_ago)) if piv_ago else 0
-        lw_piv  = 2.2 if weekly else 1.6
-
-        # Dashed line from pivot bar to the right edge
-        ax_price.hlines(pivot_high, piv_x, n + 1,
-                        color=PIVOT_C, linewidth=lw_piv,
-                        linestyle='--', alpha=0.95, zorder=5)
-
-        # Triangle marker at pivot bar (Pine Script style)
-        tri_x = min(piv_x, n - 1)
-        ax_price.scatter([tri_x], [pivot_high * 1.004],
-                         color=PIVOT_C, s=48, marker='v', zorder=7, linewidths=0)
-
-        # Inline price box just above triangle
-        ax_price.text(tri_x, pivot_high * 1.016, f'{pivot_high:,.2f}',
-                      color=PIVOT_C, fontsize=8, fontweight='bold',
-                      ha='center', va='bottom', zorder=8, clip_on=True,
-                      bbox=dict(boxstyle='round,pad=0.25', fc=LABEL_BG, ec=PIVOT_C, lw=1.2, alpha=0.95))
-
-        # Right-margin pivot label
-        tag = f'{"W-Piv" if weekly else "Pivot"}  {pivot_high:,.2f}'
-        ax_price.annotate(
-            tag,
-            xy=(1.0, pivot_high), xycoords=('axes fraction', 'data'),
-            xytext=(8, 0), textcoords='offset points',
-            ha='left', va='center', fontsize=7.5, fontweight='bold',
-            color=BG, clip_on=False, zorder=8,
-            bbox=dict(boxstyle='round,pad=0.32', fc=PIVOT_C, ec=PIVOT_C, alpha=0.97)
-        )
-
-        # Shaded buy zone
-        ax_price.axhspan(pivot_high * 0.97, pivot_high * 1.02,
-                         color=PIVOT_C, alpha=0.07, zorder=3)
-
-        if pivot_crossed:
-            ax_price.annotate(
-                '▲ BREAKOUT',
-                xy=(n - 1, cl[-1]),
-                xytext=(max(4, n - 14), cl[-1] * 1.025),
-                color=UP_C, fontsize=9, fontweight='bold', zorder=8,
-                arrowprops=dict(arrowstyle='->', color=UP_C, lw=1.0)
-            )
-
-    # ── CURRENT PRICE LEVEL ───────────────────────────────────────────────────
-    cur_price = float(cl[-1])
-    ax_price.hlines(cur_price, 0, n - 1,
-                    color=MUTED_C, linewidth=0.5, linestyle=(0, (2, 4)), alpha=0.6, zorder=4)
-    ax_price.annotate(
-        f' {cur_price:,.2f} ',
-        xy=(1.0, cur_price), xycoords=('axes fraction', 'data'),
-        xytext=(8, 0), textcoords='offset points',
-        ha='left', va='center', fontsize=8, fontweight='bold',
-        color=BG, clip_on=False, zorder=9,
-        bbox=dict(boxstyle='square,pad=0.25', fc=TEXT_C, ec=TEXT_C, alpha=0.97)
-    )
-
-    # ── AXES STYLING ──────────────────────────────────────────────────────────
-    for ax in (ax_price, ax_vol):
-        ax.set_facecolor(PANEL)
-        ax.tick_params(
-            colors=MUTED_C, labelsize=7.5, length=3, width=0.4, pad=4,
-            left=False, right=True, labelleft=False, labelright=True
-        )
-        for spine in ax.spines.values():
-            spine.set_color(GRID_C)
-            spine.set_linewidth(0.6)
-        ax.yaxis.set_label_position('right')
-        ax.yaxis.tick_right()
-
-    # Light horizontal grid (TradingView style)
-    ax_price.yaxis.grid(True, color=GRID_C, linewidth=0.5, alpha=0.9)
-    ax_price.xaxis.grid(False)
-    ax_vol.yaxis.grid(False)
-    ax_vol.xaxis.grid(False)
-
-    ax_price.set_xlim(-1, n + 1)
-    ax_price.yaxis.set_major_formatter(mticker.FuncFormatter(
-        lambda x, _: f'{x:,.0f}' if x >= 1000 else f'{x:.2f}'
-    ))
-    ax_price.tick_params(axis='y', colors=MUTED_C, labelsize=7.5)
-    ax_vol.set_yticks([])
-    plt.setp(ax_price.get_xticklabels(), visible=False)
-
-    # Date x-ticks
-    step = max(1, n // 8)
-    tick_idx = sorted(set(list(range(0, n, step)) + [n - 1]))
-    fmt = "%b '%y" if weekly else '%d %b'
-    ax_vol.set_xticks(tick_idx)
-    ax_vol.set_xticklabels(
-        [df.index[i].strftime(fmt) for i in tick_idx],
-        color=MUTED_C, fontsize=7, ha='center'
-    )
-
-    # ── HEADER BAND ───────────────────────────────────────────────────────────
-    fig.add_artist(Line2D([0, 1], [0.88, 0.88], transform=fig.transFigure,
-                          color=GRID_C, linewidth=0.8, solid_capstyle='butt'))
-
-    # Ticker + timeframe
-    fig.text(0.012, 0.982, ticker,
-             color=TEXT_C, fontsize=15, fontweight='bold', va='top', ha='left',
-             fontfamily='monospace')
-    tf_x = 0.012 + len(ticker) * 0.0128 + 0.005
-    fig.text(tf_x, 0.983, f'[{tf_str}]',
-             color=MUTED_C, fontsize=8, va='top', ha='left', fontfamily='monospace')
-
-    # Price + pct from high inline
-    price_color = UP_C if (len(cl) > 1 and cl[-1] >= cl[-2]) else DN_C
-    fig.text(tf_x + 0.045, 0.983, price_str,
-             color=price_color, fontsize=11, fontweight='bold', va='top', ha='left',
-             fontfamily='monospace')
-    if pct_h_str:
-        fig.text(tf_x + 0.045 + 0.085, 0.983, pct_h_str,
-                 color=MUTED_C, fontsize=8.5, va='top', ha='left', fontfamily='monospace')
-
-    # RS + criteria right of price
-    fig.text(tf_x + 0.045 + 0.135, 0.983,
-             f'{rs_str}   {passed_str}',
-             color=MUTED_C, fontsize=8, va='top', ha='left', fontfamily='monospace')
-
-    # MA legend
-    leg_items = [
-        (f'─ {ma_label1}', MA20_C),
-        (f'─ {ma_label2}', MA50_C),
-        (f'╌ {ma_label3}', MA200_C),
-    ]
-    lx = 0.62
-    for lbl, col in leg_items:
-        fig.text(lx, 0.983, lbl, color=col, fontsize=8, va='top', fontfamily='monospace')
-        lx += 0.082
-
-    # Pattern badge
-    badge_text = f'  {pat_name}  {pat_conf}%  '
-    fig.text(0.955, 0.983, badge_text,
-             color=label_color, fontsize=8.5, fontweight='bold', va='top', ha='center',
-             bbox=dict(boxstyle='round,pad=0.38', fc=LABEL_BG, ec=label_color, lw=1.2, alpha=0.97))
-    if pat_note:
-        fig.text(0.955, 0.917, pat_note,
-                 color=MUTED_C, fontsize=6.5, va='top', ha='center')
-
-    # ── SAVE ──────────────────────────────────────────────────────────────────
     out_path = os.path.join(out_dir, f'{ticker}{suffix}.png')
-    plt.savefig(out_path, dpi=DPI, facecolor=BG, edgecolor='none', bbox_inches='tight')
+    plt.savefig(out_path, dpi=DPI, facecolor='#FFFFFF', edgecolor='none')
     plt.close(fig)
     return out_path
 
@@ -2252,7 +2449,7 @@ def run_ai_on_screen(screen_data, cache_dir, out_dir, is_us, bars, ai_top, weekl
             continue
         try:
             src      = resample_weekly(df_daily) if weekly else df_daily
-            src      = src.tail(bars).copy()
+            src      = src.tail(min(bars, 90)).copy()
             c        = src['Close'].values.astype(float)
             h        = src['High'].values.astype(float)
             l        = src['Low'].values.astype(float)
@@ -2477,7 +2674,7 @@ Daily workflow (run every morning after scanner):
     parser.add_argument('--market',      default='both', choices=['india','us','both'])
     parser.add_argument('--max',         type=int, default=9999,
                         help='Max charts per base screen')
-    parser.add_argument('--bars',        type=int, default=90,
+    parser.add_argument('--bars',        type=int, default=250,
                         help='Candles to display per chart')
     parser.add_argument('--daily',       action='store_true',
                         help='Incremental mode: only regenerate changed charts (fast, for daily use)')
@@ -2641,6 +2838,52 @@ Daily workflow (run every morning after scanner):
             existing_data=us_data if args.daily else None,
         )
         us_data.update(extra_us)
+
+    # ── Anchored VWAP from weekly higher lows ────────────────────────────────
+    if args.market in ('india', 'both'):
+        print("\n=== INDIA — Anchored VWAP (weekly HL) ===")
+        india_data.update(build_avwap_screens(INDIA_JSON, INDIA_CACHE, OUT_INDIA, is_us=False))
+    if args.market in ('us', 'both'):
+        print("\n=== US — Anchored VWAP (weekly HL) ===")
+        us_data.update(build_avwap_screens(US_JSON, US_CACHE, OUT_US, is_us=True))
+
+    # ── Trend charts: every ticker gets a 5Y weekly (_W) and 1Y daily chart ──
+    # so the viewer's "5Y Weekly / 1Y Daily" toggle works on every screen.
+    def _ensure_both(data, cache_dir, out_dir, is_us):
+        seen = {}
+        for scr in data.values():
+            for e in (scr.get('stocks') or []) if isinstance(scr, dict) else []:
+                t = e.get('ticker')
+                if t and t not in seen:
+                    seen[t] = e
+        made = 0
+        for t, e in seen.items():
+            for weekly, suffix in ((True, '_W'), (False, '')):
+                if (t, weekly, is_us) in rendered:
+                    continue
+                if args.daily and not is_stale(t, e, manifest, out_dir, suffix):
+                    continue
+                if generate_chart(t, e, cache_dir, out_dir, is_us=is_us,
+                                  bars=args.bars, weekly=weekly):
+                    rendered.add((t, weekly, is_us))
+                    if args.daily:
+                        update_manifest(manifest, t, e, suffix)
+                    made += 1
+        print(f"  {len(seen)} tickers · {made} trend charts drawn", flush=True)
+
+    if args.market in ('india', 'both'):
+        print("\n=== INDIA — 5Y weekly / 1Y daily trend charts ===")
+        _ensure_both(india_data, INDIA_CACHE, OUT_INDIA, False)
+    if args.market in ('us', 'both'):
+        print("\n=== US — 5Y weekly / 1Y daily trend charts ===")
+        _ensure_both(us_data, US_CACHE, OUT_US, True)
+
+    # ── Sector / industry / theme rotation (Sectors tab) ──────────────────────
+    try:
+        import sector_rotation
+        sector_rotation.build([m for m in ('india', 'us') if args.market in (m, 'both')])
+    except Exception as e:
+        print(f"  sector rotation failed: {e}")
 
     # ── Near Weekly Pivot — retired ──────────────────────────────────────────
     # This was a viewer-only screen with its own pivot window, which meant it

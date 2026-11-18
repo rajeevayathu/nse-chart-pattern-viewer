@@ -23,3 +23,9 @@ screen_snapshot_*.json
 
 # Test files
 test.html
+
+# Sector rotation runtime output + caches (regenerated every run)
+sector_data.json
+sector_history.json
+.sector_cache/
+.cache_daily_long/

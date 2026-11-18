@@ -784,6 +784,10 @@ if (window.self !== window.top) document.documentElement.classList.add('is-embed
     </svg>
     <input type="text" id="search-inp" placeholder="Search ticker…" oninput="applyFilter()">
   </div>
+  <select class="sort-sel" id="view-sel" onchange="setChartView(this.value)" title="Chart timeframe: 5-year weekly trend view or 1-year daily detail">
+    <option value="weekly">📈 5Y Weekly</option>
+    <option value="daily">🕯 1Y Daily</option>
+  </select>
   <select class="sort-sel" id="sort-sel" onchange="applyFilter()">
     <option value="rs_rank_desc">RS Rank ↓</option>
     <option value="ai_conf_desc">AI Conf ↓</option>
@@ -954,7 +958,7 @@ function getVirtualScreen(key){
 var BASE_SCREENS  = new Set(['full_template','near_breakout','vcp_setup','high_ma20','rs_leaders','new_highs','near_base_pivot']);
 // Screens whose charts are drawn on the weekly timeframe — must match
 // WEEKLY_MIRROR_SCREENS in generate_charts.py.
-var WEEKLY_SCREENS= new Set(['cci34_weekly_100','cci34_weekly_cross_100','cci34_weekly_neg100','weekly_hl_pivot','ck_weekly_100','ck_weekly_cross','near_base_pivot','ai_near_pivot','weekly_near_pivot']);
+var WEEKLY_SCREENS= new Set(['cci34_weekly_100','cci34_weekly_cross_100','cci34_weekly_neg100','weekly_hl_pivot','ck_weekly_100','ck_weekly_cross','near_base_pivot','ai_near_pivot','weekly_near_pivot','avwap_hl_stage2','avwap_hl_near']);
 var AI_SCREENS    = new Set(['ai_picks']);
 
 function buildSidebar(filterQ){
@@ -1077,6 +1081,23 @@ var PAT_CLS = {BREAKOUT:'pb-BREAKOUT',VCP:'pb-VCP','NEAR HIGH':'pb-NEARHIGH',
                'ON 20MA':'pb-ON20MA','STAGE 2':'pb-STAGE2',WATCH:'pb-WATCH'};
 
 // ── RENDER GRID ──────────────────────────────────────────────────────────────
+// Chart view: 5Y Weekly (long-term trend, default) or '1Y Daily' (detail)
+var CHART_VIEW = 'weekly';
+try { CHART_VIEW = localStorage.getItem('cv_chart_view') || 'weekly'; } catch(e) {}
+function setChartView(v){
+  CHART_VIEW = v;
+  try { localStorage.setItem('cv_chart_view', v); } catch(e) {}
+  applyFilter();
+}
+// AVWAP screens keep their own weekly chart with the AVWAP lines drawn
+function chartFile(s){
+  if(CHART_VIEW === 'weekly') return (s.img && /_AV\.png$/.test(s.img)) ? s.img : s.ticker + '_W.png';
+  return s.ticker + '.png';
+}
+function chartAlt(s){ return CHART_VIEW === 'weekly' ? s.ticker + '.png' : s.ticker + '_W.png'; }
+document.addEventListener('DOMContentLoaded', function(){
+  var el = document.getElementById('view-sel'); if(el) el.value = CHART_VIEW;
+});
 var WEEKLY_CHART_SCREENS = new Set(['cci34_weekly_100','cci34_weekly_cross_100','cci34_weekly_neg100','weekly_hl_pivot','ck_weekly_100','ck_weekly_cross','near_base_pivot','ai_near_pivot','weekly_near_pivot']);
 function renderGrid(stocks){
   var cur       = market==='india' ? '₹' : '$';
@@ -1115,8 +1136,17 @@ function renderGrid(stocks){
     var price  = s.price!=null ? cur+(+s.price).toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
     var pctH   = s.pct_from_high!=null ? (s.pct_from_high>0?'+':'')+s.pct_from_high.toFixed(1)+'%' : '';
     var hcol   = s.pct_from_high!=null&&s.pct_from_high>=-5 ? 'var(--green)' : 'var(--muted2)';
-    var imgBase = s.ticker + (useWeekly ? '_W' : '') + '.png';
-    var imgSrc  = imgDir + '/' + imgBase + IMG_VER;
+    var imgSrc  = imgDir + '/' + chartFile(s) + IMG_VER;
+    var imgAlt  = imgDir + '/' + chartAlt(s) + IMG_VER;
+    // Anchored VWAP badge — distance from each weekly higher-low AVWAP
+    var avHtml = '';
+    if(s.avwap && s.avwap.length){
+      avHtml = '<span style="position:absolute;bottom:28px;left:8px;background:rgba(44,94,146,.14);'
+        +'border:1px solid rgba(44,94,146,.5);color:var(--blue);font-size:8px;font-weight:700;'
+        +'padding:2px 7px;border-radius:8px;font-family:var(--mono);letter-spacing:.03em;backdrop-filter:blur(4px)">'
+        +s.avwap.map(function(a){ return 'AV'+a.n+' '+cur+(+a.value).toLocaleString('en')+' '+(a.dist>=0?'+':'')+a.dist.toFixed(1)+'%'; }).join(' · ')
+        +'</span>';
+    }
     // Weekly pivot badge
     var wPivHtml = '';
     if(useWeekly && s.pivot_high_w){
@@ -1136,11 +1166,11 @@ function renderGrid(stocks){
     var rsNum  = +(s.rs_rank||0);
     var rsCls  = rsNum>=85 ? 'rs-hi' : rsNum>=70 ? 'rs-mid' : 'rs-lo';
     html += '<div class="card pat-'+patKey+'" data-ticker="'+s.ticker+'" onclick="openModal('+idx+')">'
-      +'<img class="card-img" src="'+imgSrc+'" alt="'+s.ticker+'" loading="lazy" onerror="this.classList.add(\'err\');var p=this.nextElementSibling;if(p)p.style.display=\'flex\'">'
+      +'<img class="card-img" src="'+imgSrc+'" alt="'+s.ticker+'" loading="lazy" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src=\''+imgAlt+'\';return;}this.classList.add(\'err\');var p=this.nextElementSibling;if(p)p.style.display=\'flex\'">'
       +'<div class="card-no-chart">No chart data</div>'
       +'<span class="card-badge '+cls+'">'+lbl+'</span>'
       +aiHtml
-      +wPivHtml
+      +(avHtml || wPivHtml)
       +'<div class="card-foot">'
         +'<div>'
           +'<div class="card-ticker">'+s.ticker+'</div>'
@@ -1175,7 +1205,7 @@ function renderAIPicks(stocks, cur, imgDir){
     var aCol=colAct[ac]||'var(--muted2)';
     var rrVal=rr(s);
     var price=s.price!=null?cur+fmt(s.price,2):'—';
-    var imgSrc=imgDir+'/'+(s.img||s.ticker+'.png')+IMG_VER;
+    var imgSrc=imgDir+'/'+chartFile(s)+IMG_VER;
     var confBar=ai.conf?'<div style="height:3px;background:var(--border2);border-radius:2px;margin:6px 0 8px"><div style="height:100%;width:'+ai.conf+'%;background:'+aCol+';border-radius:2px;transition:width .4s"></div></div>':'';
 
     html+='<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;transition:border-color .15s" onclick="openModal('+idx+')" onmouseover="this.style.borderColor=\''+aCol+'\'" onmouseout="this.style.borderColor=\'var(--border)\'">'
@@ -1253,8 +1283,10 @@ function _renderModal(){
                    'ON 20MA':'var(--orange)','STAGE 2':'var(--violet)',WATCH:'var(--border2)'}[lbl]||'var(--border2)';
   if(s.ai&&s.ai.action) stripeCol = {BUY:'var(--green)',WATCH:'var(--amber)',AVOID:'var(--red)'}[s.ai.action]||stripeCol;
   document.getElementById('m-stripe').style.background = stripeCol;
-  var useWeeklyModal = WEEKLY_CHART_SCREENS.has(currentScreen);
-  document.getElementById('m-img').src = imgDir+'/'+(s.img||(s.ticker+(useWeeklyModal?'_W':'')+'.png'))+IMG_VER;
+  var mImg = document.getElementById('m-img');
+  mImg.dataset.fb = '';
+  mImg.onerror = function(){ if(!this.dataset.fb){ this.dataset.fb = 1; this.src = imgDir+'/'+chartAlt(s)+IMG_VER; } };
+  mImg.src = imgDir+'/'+chartFile(s)+IMG_VER;
   document.getElementById('m-pos').textContent = (modalIdx+1)+' / '+displayedStocks.length;
 
   var fmt = function(v,d){ return v!=null?(+v).toLocaleString('en',{minimumFractionDigits:d||0,maximumFractionDigits:d||0}):'—'; };

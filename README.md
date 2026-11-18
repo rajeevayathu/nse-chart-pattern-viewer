@@ -10,12 +10,13 @@ A Finviz-style, locally-hosted stock chart viewer for **NSE India** (and US mark
 
 | Feature | Detail |
 |---|---|
-| **Candlestick + Volume** | OHLCV bars with color-coded volume |
-| **Moving Averages** | MA20 / MA50 / MA200 (daily) · MA10 / MA26 / MA52 (weekly) |
-| **Horizontal S/R Zones** | Cluster-based support/resistance from Minervini 10/10 pivot highs/lows (min 2 touches, 1.8% tolerance) |
-| **Base Box** | Highlights the tightest consolidation range (≤20%) in last 50 bars |
-| **Pattern Badge** | Auto-detects: Breakout · Cup & Handle · Double Bottom · Ascending Triangle · Bull Flag · Tight Base · Stage 2/4 |
-| **Daily + Weekly charts** | Each ticker gets a `_D.png` (daily 200 bars) and `_W.png` (weekly 104 bars) |
+| **Clean TradingView-style charts** | Candles, moving averages, pivots, volume — no trend lines, S/R boxes or pattern badges |
+| **Moving Averages** | EMA21 / SMA50 / SMA200 (daily) · SMA10W / SMA40W (weekly) |
+| **Pivots** | Minervini 10/10 pivot highs/lows labelled with price; dashed screen-pivot line with right-axis tag |
+| **AVWAP** | Anchored VWAP lines (AV1/AV2) drawn only on the AVWAP screens |
+| **Volume** | Up/down coloured bars with a volume MA; y-axis capped at 2.5× the 95th percentile so one spike can't flatten the rest |
+| **Daily + Weekly charts** | Each ticker gets a 1Y daily `T.png` (250 bars) and a 5Y weekly `T_W.png` (260 bars, log scale when the range is wide) |
+| **6-year history cache** | `.cache_daily_long/` (refreshed weekly) supplies 5Y weekly bars with a full 40-week MA; US dividend-adjusted caches are rescaled at the splice |
 | **40+ screens** | Full Template, Near Breakout, VCP Setup, IPO Base, ATH Breakout, Pocket Pivot, RS Leaders, Sector leaders, and more |
 | **Manifest-based incremental rebuild** | `--daily` mode skips unchanged stocks — only regenerates charts where price moved >2% |
 | **AI visual analysis** | Sends chart PNGs to a local **Ollama** vision model (`llava:7b`); stores BUY/WATCH/AVOID + pattern + confidence per stock |
@@ -33,6 +34,23 @@ A Finviz-style, locally-hosted stock chart viewer for **NSE India** (and US mark
 | **India / US market toggle** | Separate datasets; Excel download link updates automatically |
 | **Excel download button** | One-click download of the current market's screen export |
 | **Dark mode** | Native dark theme; respects `prefers-color-scheme` |
+| **5Y Weekly / 1Y Daily toggle** | View selector in the toolbar; choice remembered in `localStorage` |
+
+### Sector Rotation (`sector_rotation.py` + `sectors.html`)
+
+Tab 3 of the Gandiva portal. Ranks every dashboard stock's **sector, industry and theme** by relative performance over **3D / 1W / 1M / 3M**.
+
+| Feature | Detail |
+|---|---|
+| **Classification** | NSE sector (from NSE index constituent CSVs), Yahoo Finance industry (cached 30 days), ~25 NSE thematic indices (Banks, PSU Banks, Defence, Tourism, …). US uses Yahoo sectors/industries |
+| **Metrics** | Median return per period, excess vs universe, % up this week, % above 50-DMA, number of members in dashboard screens |
+| **Score & status** | Weighted percentile score (3D 15% · 1W 25% · 1M 30% · 3M 30%); Leading / Improving / Weakening / Lagging from short- vs long-term excess |
+| **Monitoring** | Rebuilt on every chart run (every 30 min in market hours, using live prices); `sector_history.json` keeps 120 snapshots for rank changes and sparklines |
+| **Page** | Auto-generated analysis, rotation quadrant, sortable heat table, expandable members with chart modal; auto-reloads every 2 min |
+
+```bash
+python3.10 sector_rotation.py --market both   # also runs automatically at the end of generate_charts.py
+```
 
 ---
 
@@ -141,6 +159,13 @@ Results are stored per-stock in `india_data.json` / `us_data.json` and displayed
 chart-pattern-viewer/
 ├── generate_charts.py   # chart generation + AI analysis + Excel export
 ├── chart_viewer.html    # browser-based viewer (single HTML file, no dependencies)
+├── sector_rotation.py   # sector / industry / theme performance builder
+├── sectors.html         # Sectors tab (rotation analysis page)
+├── price_updater.py     # live prices every 60s + rescan/regenerate every 30 min
+├── sector_data.json     # sector rotation output (auto-created, gitignored)
+├── sector_history.json  # rank history snapshots (auto-created, gitignored)
+├── .sector_cache/       # NSE constituent CSVs + Yahoo sector map (gitignored)
+├── .cache_daily_long/   # 6-year daily history for 5Y weekly charts (gitignored)
 ├── charts_india/        # generated PNG files (gitignored, auto-created)
 ├── charts_us/           # generated PNG files (gitignored, auto-created)
 ├── india_data.json      # screen data for viewer (auto-created, gitignored)
@@ -156,8 +181,9 @@ chart-pattern-viewer/
 
 ```python
 # Chart appearance
-BARS_DAILY   = 200   # trading days shown in daily chart
-BARS_WEEKLY  = 104   # weeks shown in weekly chart
+--bars 250           # trading days shown in daily chart (CLI default)
+WEEKLY_BARS  = 260   # weeks shown in weekly chart (5 years)
+DPI          = 150
 
 # Screening universe
 NSE_CSV      = '/path/to/nse_symbols.csv'  # 1,312 NSE tickers
