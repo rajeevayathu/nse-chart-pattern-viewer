@@ -48,6 +48,25 @@ body{
 .tile .v{ font-size:var(--g-t-18); font-weight:var(--g-w-semi); margin-top:4px; }
 .tile .s{ color:var(--g-text-3); font-size:var(--g-t-11); margin-top:2px; }
 
+/* best to trade now */
+.picks .sum{ color:var(--g-text-2); line-height:1.55; margin-bottom:12px; font-size:var(--g-t-13); }
+.picks .sum b{ color:var(--g-text); }
+.pgrid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px; margin-bottom:14px; }
+.pcard{ background:var(--g-raise-2); border:1px solid var(--g-line); border-radius:var(--g-r-md); padding:10px 12px; cursor:pointer; }
+.pcard:hover{ border-color:var(--g-line-2); background:var(--g-hover); }
+.pcard .hd{ display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+.pcard .nm{ font-weight:var(--g-w-semi); color:var(--g-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pcard .sc{ margin-left:auto; font-family:var(--g-mono); color:var(--g-brass); font-weight:var(--g-w-semi); }
+.pcard .st{ display:flex; gap:10px; font-size:var(--g-t-11); margin:6px 0 4px; flex-wrap:wrap; }
+.pcard .st span{ color:var(--g-text-4); } .pcard .st b{ font-family:var(--g-mono); font-weight:var(--g-w-semi); }
+.pcard ul{ margin:4px 0 0 14px; padding:0; color:var(--g-text-3); font-size:var(--g-t-11); line-height:1.5; }
+.v-build{ background:var(--g-up-dim); color:var(--g-up-hi); } .v-rot{ background:var(--g-info-dim); color:var(--g-info-hi); }
+.v-ext{ background:var(--g-warn-dim); color:var(--g-warn-hi); } .v-std{ background:var(--g-chip); color:var(--g-text-2); }
+.picks h4{ font-size:var(--g-t-11); color:var(--g-text-3); text-transform:uppercase; letter-spacing:var(--g-track-eyebrow); margin:6px 0 8px; font-weight:var(--g-w-semi); }
+.tag-x{ display:inline-block; font-size:var(--g-t-10); padding:1px 6px; margin:1px 2px; border-radius:var(--g-r-pill); }
+.avoid{ margin-top:12px; color:var(--g-text-3); font-size:var(--g-t-12); line-height:1.5; }
+.note{ margin-top:8px; color:var(--g-text-4); font-size:var(--g-t-11); line-height:1.5; }
+
 /* analysis + quadrant */
 .split{ display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:16px; }
 @media (max-width:1000px){ .split{ grid-template-columns:1fr; } }
@@ -132,6 +151,7 @@ tr.members > td{ padding:0; background:var(--g-raise-2); }
 
 <div class="wrap">
   <div class="tone" id="tone"></div>
+  <div class="card picks" id="picks-card"><h3>Best to trade now — where momentum is building</h3><div id="picks"></div></div>
   <div class="split">
     <div class="card"><h3>Analysis</h3><div class="insight" id="insight"></div></div>
     <div class="card"><h3>Rotation map — short term (3D+1W) vs long term (1M+3M), excess over the market</h3><svg id="quad" viewBox="0 0 560 380"></svg></div>
@@ -211,7 +231,7 @@ function render(){
   var m = DATA[MARKET];
   if(!m){ document.getElementById('tbl').innerHTML='<tr><td class="empty">No data for this market yet</td></tr>'; return; }
   document.getElementById('stamp').textContent = 'Prices '+(m.last_bar||'')+' · built '+(DATA.generated_at||'')+' · '+m.stocks+' stocks';
-  renderTone(m); renderInsight(m); renderQuad(m); renderTable(m);
+  renderTone(m); renderPicks(m); renderInsight(m); renderQuad(m); renderTable(m);
 }
 
 function renderTone(m){
@@ -228,6 +248,63 @@ function renderTone(m){
   h += '<div class="tile"><div class="k">Breadth · above 50-DMA</div><div class="v mono">'+a50+'%</div><div class="s">of stocks</div></div>';
   document.getElementById('tone').innerHTML = h;
 }
+
+function verdictCls(v){
+  return /^Momentum/.test(v)? 'v-build' : /^Early/.test(v)? 'v-rot' : /^Extended|weak tape/.test(v)? 'v-ext' : 'v-std';
+}
+function tagCls(t){ return {'At highs':'t-lead','Near highs':'t-lead','Moving now':'t-impr','Pulling back':'t-neu','Extended':'t-weak'}[t]||'t-neu'; }
+function renderPicks(m){
+  var P = m.picks, el = document.getElementById('picks');
+  if(!P){ el.innerHTML = '<div class="empty">Picks appear after the next sector_rotation.py run</div>'; return; }
+  var TL = {sector:'Sector', industry:'Industry', theme:'Theme'}, cur = MARKET==='india'?'₹':'$';
+  var sum = esc(P.summary).replace(/(Best sectors:|Strongest industries:|Themes to favour:|Momentum is building fastest in|Top setups:)/g, '<b>$1</b>');
+  var h = '<div class="sum">'+sum+'</div>';
+  if(P.groups.length){
+    h += '<h4>Groups — ranked by trade score</h4><div class="pgrid">';
+    P.groups.forEach(function(g){
+      h += '<div class="pcard" data-type="'+g.type+'" data-name="'+esc(g.name)+'" title="Show in the table below">'
+        + '<div class="hd"><span class="chip">'+TL[g.type]+'</span><span class="nm">'+esc(g.name)+'</span><span class="sc" title="Trade score (0–100)">'+g.trade_score.toFixed(0)+'</span></div>'
+        + '<span class="pill '+verdictCls(g.verdict)+'">'+esc(g.verdict)+'</span>'
+        + '<div class="st">'+[['1W',g.r1w],['1M',g.r1m],['3M',g.r3m]].map(function(x){return '<span>'+x[0]+' <b class="'+((x[1]||0)>=0?'chg-up':'chg-dn')+'">'+pct(x[1])+'</b></span>';}).join('')
+        + '<span>>50DMA <b>'+g.above50+'%</b></span><span>Setups <b>'+g.in_screens+'/'+g.n+'</b></span></div>'
+        + '<ul>'+g.why.map(function(w){return '<li>'+esc(w)+'</li>';}).join('')+'</ul></div>';
+    });
+    h += '</div>';
+  }
+  if(P.stocks.length){
+    h += '<h4>Stocks — dashboard setups inside those groups</h4><div class="tbl-wrap"><table><thead><tr>'
+      + '<th class="l">#</th><th class="l">Stock</th><th>Score</th><th>Price</th><th>3D</th><th>1W</th><th>1M</th><th>From 52W high</th><th>RS</th><th class="l">Status</th><th class="l">Why it is here</th><th class="l">Setups</th></tr></thead><tbody>';
+    P.stocks.forEach(function(s, i){
+      h += '<tr><td class="l muted mono">'+(i+1)+'</td><td class="l"><span class="tk" data-t="'+esc(s.t)+'">'+esc(s.t)+'</span><div class="muted" style="font-size:var(--g-t-10)">'+esc(s.industry||s.sector||'')+'</div></td>'
+        + '<td class="mono">'+s.pick_score.toFixed(0)+'</td>'
+        + '<td class="mono">'+cur+(s.price!=null? s.price.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—')+'</td>'
+        + ['r3d','r1w','r1m'].map(function(k){ var v=s[k]; return '<td class="mono '+(v==null?'':v>=0?'chg-up':'chg-dn')+'">'+pct(v)+'</td>'; }).join('')
+        + '<td class="mono">'+pct(s.from_high)+'</td><td class="mono">'+(s.rs!=null?s.rs:'—')+'</td>'
+        + '<td class="l">'+(s.tags||[]).map(function(t){return '<span class="tag-x '+tagCls(t)+'">'+esc(t)+'</span>';}).join('')+'</td>'
+        + '<td class="l muted">'+(s.groups||[]).map(esc).join('<br>')+'</td>'
+        + '<td class="l">'+(s.setups||[]).slice(0,4).map(function(x){return '<span class="chip">'+esc(x)+'</span>';}).join('')+((s.setups||[]).length>4?'<span class="muted"> +'+(s.setups.length-4)+'</span>':'')+'</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  if(P.avoid && P.avoid.length){
+    h += '<div class="avoid"><span class="tag-x t-lag">Avoid for new longs</span> '
+      + P.avoid.map(function(a){ return '<b>'+esc(a.name)+'</b> <span class="mono muted">3M '+pct(a.r3m)+'</span>'; }).join(' · ')+'</div>';
+  }
+  h += '<div class="note">How this is ranked: a group must be Leading or Improving, beat the market this week, and have at least half its stocks above the 50-DMA. '
+    + 'Trade score = 35% multi-period strength + 25% acceleration (this week vs its 1M pace) + 25% breadth + 15% share of stocks with scanner setups. '
+    + 'Stocks must be in a real setup screen (not just C1–C8), above the 50-DMA, within 15% of the 52W high, up over 1M, with RS ≥ 70; max 3 per sector. '
+    + '“Extended” means +20% in a month at highs: wait for a tight base or a pullback rather than chasing. Updates with every rescan.</div>';
+  el.innerHTML = h;
+}
+document.getElementById('picks').onclick = function(e){
+  var tk = e.target.closest('.tk'); if(tk){ openChart(tk.dataset.t); return; }
+  var c = e.target.closest('.pcard'); if(!c) return;
+  GROUP = c.dataset.type; save();
+  document.getElementById('search').value = c.dataset.name;
+  OPEN = {}; OPEN[MARKET+"|"+GROUP+"|"+c.dataset.name] = true;
+  render();
+  document.getElementById('tbl').scrollIntoView({behavior:'smooth', block:'start'});
+};
 
 function names(list, n, field){
   return list.slice(0, n||4).map(function(g){

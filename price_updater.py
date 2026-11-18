@@ -43,6 +43,7 @@ PYTHON          = sys.executable
 # ── Config ────────────────────────────────────────────────────────────────────
 PRICE_INTERVAL_S   = 60          # price fetch cadence (seconds)
 RESCAN_INTERVAL_S  = 30 * 60    # full re-scan cadence (30 min)
+SECTOR_INTERVAL_S  = 5 * 60     # sector rotation / trade picks on live prices
 BATCH_SIZE         = 200         # stocks per yfinance call
 MAX_WORKERS        = 1           # sequential — yfinance rate-limits parallel calls
 IST                = timezone(timedelta(hours=5, minutes=30))   # UTC+5:30
@@ -336,8 +337,23 @@ def patch_us_data(prices: dict):
         os.replace(tmp, US_DATA)
 
 # ── Price loop ────────────────────────────────────────────────────────────────
+def refresh_sectors(markets):
+    """Rebuild sector_data.json from the latest live prices. Skipped while a
+    full rescan runs: generate_charts rebuilds it at the end anyway."""
+    if not _rescan_lock.acquire(blocking=False):
+        return
+    try:
+        import sector_rotation
+        sector_rotation.build(markets)
+    except Exception as e:
+        log.warning(f'Sector rotation refresh failed: {e}')
+    finally:
+        _rescan_lock.release()
+
+
 def price_loop():
     log.info('Price updater started (India + US) — press Ctrl+C to stop')
+    last_sectors = 0.0
     while True:
         india_open = market_open()
         us_open    = us_market_open()
@@ -370,6 +386,10 @@ def price_loop():
                 write_live_us_prices(us_prices)
                 patch_us_data(us_prices)
                 log.info(f'[US] Updated {len(us_prices)}/{len(us_tickers)} in {time.time()-t1:.1f}s')
+
+        if time.time() - last_sectors >= SECTOR_INTERVAL_S:
+            refresh_sectors([m for m, o in (('india', india_open), ('us', us_open)) if o])
+            last_sectors = time.time()
 
         elapsed = time.time() - t0
         time.sleep(max(0, PRICE_INTERVAL_S - elapsed))

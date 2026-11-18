@@ -257,6 +257,17 @@ def stock_metrics(is_us):
 
 
 # ── dashboard context ─────────────────────────────────────────────────────────
+# Screens that are actual entry setups. The C1–C8 criteria lists, CCI ≥ 100,
+# Chartink, F&O and listing-age lists hold most uptrending stocks, so they say
+# little about whether a stock is actionable now.
+SETUP_SCREENS = {
+    'full_template', 'near_breakout', 'vcp_setup', 'breakout_alert', 'v4_live_signal',
+    'minervini_backtest', 'new_highs', 'htf_setup', 'htf_potential', 'hhhl_pullback',
+    'ma_pullback', 'weekly_hl_pivot', 'high_ma20', 'high_ma50', 'ipo_base', 'ipo_near_pivot',
+    'primary_base_new', 'primary_base_10yr', 'cci34_daily_cross_100', 'cci34_weekly_cross_100',
+    'cci34_best_setups', 'strong_earnings', 'near_base_pivot', 'ai_near_pivot', 'rs_leaders'}
+
+
 def dashboard_context(is_us):
     """rs_rank and the bullish screens each stock appears in on the dashboard."""
     path = os.path.join(SCANNER_DIR, 'results_us.json' if is_us else 'results.json')
@@ -269,11 +280,17 @@ def dashboard_context(is_us):
         label = scr.get('label', key)
         for s in scr.get('stocks', []):
             t = str(s.get('ticker', '')).replace('.NS', '')
-            c = ctx.setdefault(t, {'rs': s.get('rs_rank'), 'screens': []})
+            c = ctx.setdefault(t, {'rs': s.get('rs_rank'), 'screens': [], 'setups': []})
             if c['rs'] is None:
                 c['rs'] = s.get('rs_rank')
-            if len(c['screens']) < 40:
-                c['screens'].append(re.sub(r'[^\w &/+%()≥<>.-]', '', label).strip() or key)
+            name = re.sub(r'[^\w &/+%()≥<>.-]', '', label.replace('—', '-').replace('>=', '≥'))
+            name = re.sub(r'\s+', ' ', name).strip() or key
+            if key in SETUP_SCREENS:
+                c['setups'].append(name)
+            elif len(c['screens']) < 40:
+                c['screens'].append(name)
+    for c in ctx.values():                      # setups first, then the rest
+        c['screens'] = c['setups'] + c['screens']
     return ctx
 
 
@@ -316,7 +333,8 @@ def aggregate(metrics, cls, ctx):
                 row[k + '_x'] = round(row[k] - univ[k], 2) if row[k] is not None else None
             row['up_1w']   = round(100 * np.mean([(metrics[t].get('r1w') or 0) > 0 for t in members]))
             row['above50'] = round(100 * np.mean([metrics[t]['above50'] for t in members]))
-            row['in_screens'] = sum(1 for t in members if t in ctx)
+            row['in_screens'] = sum(1 for t in members if (ctx.get(t) or {}).get('setups'))
+            row['from_high'] = round(float(np.median([metrics[t]['from_high'] for t in members])), 1)
             short = np.mean([row['r3d_x'] or 0, row['r1w_x'] or 0])
             long_ = np.mean([row['r1m_x'] or 0, row['r3m_x'] or 0])
             row['status'] = _status(short, long_)
@@ -327,6 +345,7 @@ def aggregate(metrics, cls, ctx):
                  'above50': metrics[t]['above50'],
                  'rs': (ctx.get(t) or {}).get('rs'),
                  'screens': (ctx.get(t) or {}).get('screens', [])[:12],
+                 'setups': (ctx.get(t) or {}).get('setups', []),
                  'industry': cls.get(t, {}).get('industry', ''),
                  'sector': cls.get(t, {}).get('sector', '')}
                 for t in top]
@@ -346,6 +365,154 @@ def aggregate(metrics, cls, ctx):
                 r['rank'] = i + 1
         result[gname] = rows
     return result, {k: round(v, 2) for k, v in univ.items()}
+
+
+# ── what to trade now ─────────────────────────────────────────────────────────
+GROUP_LABEL = {'sector': 'Sector', 'industry': 'Industry', 'theme': 'Theme'}
+PICK_SLOTS  = {'sector': 3, 'industry': 4, 'theme': 3}
+MIN_PICK_N  = {'sector': 5, 'industry': 4, 'theme': 5}
+
+
+def _pctile(vals):
+    """value -> 0..100 percentile within vals (None -> 0)."""
+    clean = sorted(v for v in vals if v is not None)
+    if len(clean) < 2:
+        return lambda v: 50.0
+    return lambda v: 0.0 if v is None else 100.0 * np.searchsorted(clean, v, side='left') / (len(clean) - 1)
+
+
+def _accel(r):
+    """Momentum building: this week's excess vs the average weekly pace over the
+    month, plus the last 3 days vs the week. > 0 means it is speeding up."""
+    w, m, d = r.get('r1w_x'), r.get('r1m_x'), r.get('r3d_x')
+    if w is None or m is None:
+        return None
+    return round((w - m * 5 / 21) + ((d - w * 3 / 5) if d is not None else 0), 2)
+
+
+def trade_picks(groups, univ, is_us):
+    """Rank groups and stocks by how tradeable they are right now."""
+    cands = []
+    for gname, rows in groups.items():
+        if is_us and gname == 'theme':
+            continue
+        for r in rows:
+            r['accel'] = _accel(r)
+        acc_p = _pctile([r['accel'] for r in rows])
+        set_p = _pctile([r['in_screens'] / r['n'] for r in rows])
+        for r in rows:
+            breadth = (r['above50'] + r['up_1w']) / 2
+            r['trade_score'] = round(0.35 * r['score'] + 0.25 * acc_p(r['accel'])
+                                     + 0.25 * breadth + 0.15 * set_p(r['in_screens'] / r['n']), 1)
+            ok = (r['status'] in ('Leading', 'Improving') and r['n'] >= MIN_PICK_N[gname]
+                  and (r.get('r1w_x') or 0) > 0 and r['above50'] >= 50)
+            if ok:
+                cands.append((gname, r))
+
+    picks, used = [], {g: 0 for g in PICK_SLOTS}
+    for gname, r in sorted(cands, key=lambda x: -x[1]['trade_score']):
+        if used[gname] >= PICK_SLOTS[gname]:
+            continue
+        used[gname] += 1
+        extended = r['from_high'] > -4 and (r.get('r1m') or 0) > 12
+        if extended:
+            verdict = 'Extended — buy pullbacks'
+        elif (r.get('r1w') or 0) <= 0:
+            verdict = 'Holding up in a weak tape'
+        elif r['status'] == 'Leading' and (r['accel'] or 0) >= 0.5:
+            verdict = 'Momentum building'
+        elif r['status'] == 'Leading':
+            verdict = 'Leader, steady pace'
+        else:
+            verdict = 'Early rotation'
+        why = []
+        why.append(f"1W {r['r1w']:+.1f}% vs market {univ['r1w']:+.1f}%")
+        if (r['accel'] or 0) >= 0.5:
+            why.append('accelerating vs its 1M pace')
+        if extended:
+            why.append(f"median stock {r['from_high']:+.1f}% from 52W high")
+        why.append(f"{r['up_1w']}% up this week")
+        if r['in_screens']:
+            why.append(f"{r['in_screens']} of {r['n']} with scanner setups")
+        if r.get('chg_1w'):
+            why.append(f"rank {'▲' if r['chg_1w'] > 0 else '▼'}{abs(r['chg_1w'])} in a week")
+        picks.append({'type': gname, 'name': r['name'], 'n': r['n'], 'rank': r['rank'],
+                      'status': r['status'], 'verdict': verdict, 'trade_score': r['trade_score'],
+                      'accel': r['accel'], 'r3d': r['r3d'], 'r1w': r['r1w'], 'r1m': r['r1m'],
+                      'r3m': r['r3m'], 'above50': r['above50'], 'up_1w': r['up_1w'],
+                      'in_screens': r['in_screens'], 'from_high': r['from_high'], 'why': why})
+    picks.sort(key=lambda p: -p['trade_score'])
+
+    # stocks: actionable setups inside the picked groups
+    pool = {}
+    for p in picks:
+        r = next(x for x in groups[p['type']] if x['name'] == p['name'])
+        for m in r['members']:
+            if not m['setups'] or not m['above50'] or m['from_high'] < -15:
+                continue
+            if (m.get('r1m') or 0) <= 0 or (m.get('rs') is not None and m['rs'] < 70):
+                continue
+            e = pool.setdefault(m['t'], {**m, 'groups': [], 'gscore': 0})
+            e['groups'].append(f"{GROUP_LABEL[p['type']]}: {p['name']}")
+            e['gscore'] = max(e['gscore'], p['trade_score'])
+    vals = list(pool.values())
+    r1m_p = _pctile([v.get('r1m') for v in vals])
+    r1w_p = _pctile([v.get('r1w') for v in vals])
+    for v in vals:
+        near = max(0.0, 100 + v['from_high'] * 100 / 15)          # 0% off high -> 100, -15% -> 0
+        v['pick_score'] = round(0.25 * (v['rs'] if v['rs'] is not None else 60)
+                                + 0.20 * r1m_p(v.get('r1m')) + 0.15 * r1w_p(v.get('r1w'))
+                                + 0.15 * near + 0.10 * min(100, 25 * len(v['setups']))
+                                + 0.15 * v['gscore'], 1)
+        tags = []
+        if v['from_high'] >= -3:
+            tags.append('At highs')
+        elif v['from_high'] >= -8:
+            tags.append('Near highs')
+        if (v.get('r3d') or 0) < 0 < (v.get('r1m') or 0):
+            tags.append('Pulling back')
+        if (v.get('r1w') or 0) > 0 and (v.get('r3d') or 0) > 0:
+            tags.append('Moving now')
+        if (v.get('r1m') or 0) >= 20 and v['from_high'] >= -3:
+            tags.append('Extended')
+        v['tags'] = tags
+    stocks, per_sector = [], {}
+    for v in sorted(vals, key=lambda x: -x['pick_score']):
+        key = v.get('sector') or v.get('industry') or '?'
+        if per_sector.get(key, 0) >= 3:                           # keep the list diversified
+            continue
+        per_sector[key] = per_sector.get(key, 0) + 1
+        stocks.append({k: v.get(k) for k in ('t', 'price', 'r3d', 'r1w', 'r1m', 'r3m', 'from_high',
+                                             'rs', 'sector', 'industry', 'setups', 'groups',
+                                             'tags', 'pick_score')})
+        if len(stocks) >= 15:
+            break
+
+    avoid = []
+    for gname in ('sector', 'industry'):
+        lag = [r for r in groups[gname] if r['status'] == 'Lagging' and r['n'] >= MIN_PICK_N[gname]]
+        avoid += [{'type': gname, 'name': r['name'], 'r1m': r['r1m'], 'r3m': r['r3m'],
+                   'above50': r['above50']} for r in sorted(lag, key=lambda r: r['trade_score'])[:3]]
+
+    # one-paragraph read
+    secs = [p['name'] for p in picks if p['type'] == 'sector']
+    inds = [p['name'] for p in picks if p['type'] == 'industry']
+    ths  = [p['name'] for p in picks if p['type'] == 'theme']
+    building = [p['name'] for p in picks if p['verdict'] == 'Momentum building']
+    parts = []
+    if secs:
+        parts.append('Best sectors: ' + ', '.join(secs) + '.')
+    if inds:
+        parts.append('Strongest industries: ' + ', '.join(inds) + '.')
+    if ths:
+        parts.append('Themes to favour: ' + ', '.join(ths) + '.')
+    if building:
+        parts.append('Momentum is building fastest in ' + ', '.join(building[:4]) + '.')
+    if stocks:
+        parts.append('Top setups: ' + ', '.join(s['t'] for s in stocks[:6]) + '.')
+    if not picks:
+        parts.append('No group passes the momentum filters right now. Stay selective or wait.')
+    return {'groups': picks, 'stocks': stocks, 'avoid': avoid, 'summary': ' '.join(parts)}
 
 
 # ── rank history ──────────────────────────────────────────────────────────────
@@ -387,13 +554,14 @@ def build_market(is_us):
     groups, univ = aggregate(metrics, cls, ctx)
     as_of = str(datetime.date.today())
     hist_dates = update_history(market, as_of, groups)
+    picks = trade_picks(groups, univ, is_us)
     unclassified = sum(1 for t in metrics if not cls[t].get('sector'))
     print(f"  {market}: {len(metrics)} stocks · {len(groups['sector'])} sectors · "
           f"{len(groups['industry'])} industries · {len(groups['theme'])} themes"
           f" · {unclassified} unclassified", flush=True)
     return {'as_of': as_of, 'last_bar': str(last_bar.date()) if last_bar is not None else None,
             'stocks': len(metrics), 'universe': univ, 'hist_dates': hist_dates,
-            'groups': groups}
+            'groups': groups, 'picks': picks}
 
 
 def build(markets=('india', 'us')):

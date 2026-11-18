@@ -45,7 +45,8 @@ Tab 3 of the Gandiva portal. Ranks every dashboard stock's **sector, industry an
 | **Classification** | NSE sector (from NSE index constituent CSVs), Yahoo Finance industry (cached 30 days), ~25 NSE thematic indices (Banks, PSU Banks, Defence, Tourism, …). US uses Yahoo sectors/industries |
 | **Metrics** | Median return per period, excess vs universe, % up this week, % above 50-DMA, number of members in dashboard screens |
 | **Score & status** | Weighted percentile score (3D 15% · 1W 25% · 1M 30% · 3M 30%); Leading / Improving / Weakening / Lagging from short- vs long-term excess |
-| **Monitoring** | Rebuilt on every chart run (every 30 min in market hours, using live prices); `sector_history.json` keeps 120 snapshots for rank changes and sparklines |
+| **Monitoring** | Rebuilt every 5 min on live prices by `price_updater.py`, and after every 30-min rescan; `sector_history.json` keeps 120 snapshots for rank changes and sparklines |
+| **Best to trade now** | Groups must be Leading/Improving, beat the market this week and have ≥50% above the 50-DMA. Trade score = 35% multi-period strength + 25% acceleration (1W vs 1M pace) + 25% breadth + 15% share with scanner setups. Stock picks: in a real setup screen (not C1–C8), above 50-DMA, within 15% of the 52W high, RS ≥ 70, max 3 per sector; tagged At highs / Pulling back / Moving now / Extended |
 | **Page** | Auto-generated analysis, rotation quadrant, sortable heat table, expandable members with chart modal; auto-reloads every 2 min |
 
 ```bash
