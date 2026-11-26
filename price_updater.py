@@ -17,7 +17,7 @@ Usage:
   python3.10 price_updater.py --force    # run even outside market hours (testing)
 """
 
-import json, os, sys, time, threading, subprocess, logging
+import json, os, sys, time, threading, subprocess, logging, resource
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -45,6 +45,7 @@ PRICE_INTERVAL_S   = 60          # price fetch cadence (seconds)
 RESCAN_INTERVAL_S  = 30 * 60    # full re-scan cadence (30 min)
 SECTOR_INTERVAL_S  = 5 * 60     # sector rotation / trade picks on live prices
 BATCH_SIZE         = 200         # stocks per yfinance call
+YF_THREADS         = 8           # parallel downloads per call; threads=True opens one per symbol
 MAX_WORKERS        = 1           # sequential — yfinance rate-limits parallel calls
 IST                = timezone(timedelta(hours=5, minutes=30))   # UTC+5:30
 ET                 = timezone(timedelta(hours=-4))              # EDT (UTC-4); -5 in EST
@@ -139,7 +140,7 @@ def _yf_batch(syms: list[str], interval: str, period: str) -> dict:
     out = {}
     try:
         df = yf.download(syms, period=period, interval=interval,
-                         progress=False, auto_adjust=True, threads=True)
+                         progress=False, auto_adjust=True, threads=YF_THREADS)
         if df.empty:
             return out
         close_df = df['Close'] if isinstance(df.columns, pd.MultiIndex) else df[['Close']]
@@ -444,7 +445,24 @@ def rescan_loop():
         time.sleep(RESCAN_INTERVAL_S)
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+def _raise_fd_limit():
+    """launchd starts agents with a 256 open-file soft limit. A threaded
+    200-symbol download plus connections left over from earlier cycles
+    exhausted it, and the failures surfaced as curl 'getaddrinfo() thread
+    failed to start' and sqlite 'unable to open database file'. After that,
+    US prices updated for ~5 of 480 symbols."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 8192 if hard == resource.RLIM_INFINITY else min(8192, hard)
+    if soft < want:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+        except (ValueError, OSError) as e:
+            log.warning(f'Could not raise open-file limit: {e}')
+    log.info(f'Open-file limit: {resource.getrlimit(resource.RLIMIT_NOFILE)[0]}')
+
+
 if __name__ == '__main__':
+    _raise_fd_limit()
     rescan_thread = threading.Thread(target=rescan_loop, daemon=True)
     rescan_thread.start()
 

@@ -228,7 +228,7 @@ def stock_metrics(is_us):
     if newest is None:
         return {}, None
 
-    out = {}
+    out, last_bar = {}, None
     for t, (c, v) in rows.items():
         if (newest - c.index[-1]).days > 10:          # stale / delisted
             continue
@@ -242,6 +242,7 @@ def stock_metrics(is_us):
             elif c.index[-1] < live_day and lp.get('prev_close') and \
                     abs(float(lp['prev_close']) / c.iloc[-1] - 1) < 0.01:
                 c = pd.concat([c, pd.Series([p], index=[live_day])])
+        last_bar = c.index[-1] if last_bar is None or c.index[-1] > last_bar else last_bar
         vals = c.values
         m = {'price': round(float(vals[-1]), 2)}
         for key, n in PERIODS:
@@ -253,7 +254,7 @@ def stock_metrics(is_us):
         if v is not None and len(v) >= 20:
             m['turnover'] = float((c.iloc[-20:] * v.reindex(c.index).iloc[-20:].fillna(0)).mean())
         out[t] = m
-    return out, max(c.index[-1] for c, _ in rows.values())
+    return out, last_bar                         # includes a folded-in live bar
 
 
 # ── dashboard context ─────────────────────────────────────────────────────────

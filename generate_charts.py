@@ -2377,7 +2377,7 @@ def save_manifest(manifest):
     with open(MANIFEST_PATH, 'w') as f:
         json.dump(manifest, f, indent=2, default=str)
 
-def is_stale(ticker, entry, manifest, out_dir, suffix='', price_threshold=0.02):
+def is_stale(ticker, entry, manifest, out_dir, suffix='', price_threshold=0.005):
     """
     Returns True if the chart should be regenerated.
     Stale when: PNG missing, ticker new, price changed ≥ threshold, or date changed.
@@ -2389,16 +2389,13 @@ def is_stale(ticker, entry, manifest, out_dir, suffix='', price_threshold=0.02):
     if key not in manifest:
         return True
     m = manifest[key]
-    today = str(datetime.date.today())
-    if m.get('date') != today:
-        # Price moved significantly since last generation
-        last_price = float(m.get('price', 0))
-        cur_price  = float(entry.get('price', entry.get('close', 0)) or 0)
-        if last_price > 0 and abs(cur_price - last_price) / last_price >= price_threshold:
-            return True
-        # Also stale if it's been more than 1 day (ensure daily freshness)
-        return True
-    return False
+    if m.get('date') != str(datetime.date.today()):
+        return True                      # new day: always redraw
+    # Drawn earlier today. Without this check a chart drawn mid-session stayed
+    # frozen until tomorrow, so the closing candle never appeared.
+    last_price = float(m.get('price', 0) or 0)
+    cur_price  = float(entry.get('price', entry.get('close', 0)) or 0)
+    return last_price <= 0 or abs(cur_price - last_price) / last_price >= price_threshold
 
 def update_manifest(manifest, ticker, entry, suffix=''):
     key = ticker + suffix
